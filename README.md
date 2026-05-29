@@ -26,11 +26,25 @@ Works with hosts that spawn many parallel subagents (Parallel Teams mode), hosts
 
 Use it when you want to audit, review, harden, or fix a codebase with multiple agents without them colliding.
 
+### [`anakin-mission-control`](skills/anakin-mission-control/SKILL.md)
+
+The forward twin of the review sprint. One agent conducts (Anakin) and decomposes the goal. A design panel proposes rival approaches that independent critics red team, so the plan is stress tested before any code exists. Builders each own a disjoint slice and ship it against a frozen contract, while independent verifiers accept work they did not write and surface what is missing. The output is a roadmap, a clean diff, and a readiness score you can defend from that diff.
+
+Same three execution modes as its sibling (Parallel Teams, Sequential Slices, Solo), so it runs on any host whether or not it spawns subagents. It writes only under `.mission-control/`, so it never collides with a review sprint, and recommends one when the build is done to harden the result.
+
+Use it when you want to plan and build a large feature or roadmap, break a big ambiguous idea into a sequenced plan, weigh competing architectures before committing, or coordinate several agents to ship something new without them colliding.
+
 ## Repo layout
 
 ```
 agentique/
 └── skills/
+    ├── anakin-mission-control/
+    │   ├── SKILL.md
+    │   └── references/
+    │       ├── execution-modes.md
+    │       ├── handoff-schemas.md
+    │       └── roadmap-and-decomposition.md
     └── jarvis-snowden-academy/
         ├── SKILL.md
         └── references/
