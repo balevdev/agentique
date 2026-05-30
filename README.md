@@ -11,49 +11,41 @@ Distributed through the open [skills.sh](https://skills.sh) ecosystem.
 npx skills add balevdev/agentique
 
 # or pick a single skill
-npx skills add balevdev/agentique --skill jarvis-snowden-academy
+npx skills add balevdev/agentique --skill agent-sprint
 ```
 
 Pass `-g` for a global install, or `-a claude-code` (etc.) to target one agent. See `npx skills add --help` for the full set.
 
 ## Skills in this repo
 
-### [`jarvis-snowden-academy`](skills/jarvis-snowden-academy/SKILL.md)
+### [`agent-sprint`](skills/agent-sprint/SKILL.md)
 
-A drop-in, harness-agnostic protocol for pointing a disciplined team of agents at a single repo. One agent conducts (Jarvis). Workers each own a disjoint slice, inventory what it does, and fix what is wrong. Independent verifiers audit the work they did not write. The output is a capability map and a score you can defend from the diff.
+A drop-in, harness-agnostic protocol for pointing a disciplined team of agents at one repo. One agent conducts; owners each take a disjoint slice; independent verifiers accept the work they did not write. The output is a roadmap or capability map, a clean diff, and a result you can defend from that diff. It runs in one of two modes, chosen by intent, over a single shared spine.
 
-Works with hosts that spawn many parallel subagents (Parallel Teams mode), hosts that spawn them serially (Sequential Slices mode), and hosts with no subagent primitive at all (Solo mode). Same phases, artifacts, and scoring across all three.
+**`mode: build`** diverges then converges for new work. It decomposes the goal, optionally runs a design tournament that independent critics red team so the plan is stress tested before any code exists, then owners ship their slices against a frozen contract while verifiers surface what is missing. It writes only under `.mission-control/`, and recommends a review when the build is done to harden the result. Use it to plan and build a large feature or roadmap, break a big ambiguous idea into a sequenced plan, weigh competing architectures before committing, or coordinate several agents to ship something new.
 
-Use it when you want to audit, review, harden, or fix a codebase with multiple agents without them colliding.
+**`mode: review`** converges on an existing repo. Owners partition it off its real module boundaries, inventory what each slice does, and fix what is wrong; verifiers audit the fixes they did not write. It writes only under `.team-review/`, so a review and a build on the same repo never collide. Use it to audit, review, harden, or fix a codebase, inventory its capabilities, or point several agents at one repo without them colliding.
 
-### [`anakin-mission-control`](skills/anakin-mission-control/SKILL.md)
-
-The forward twin of the review sprint. One agent conducts (Anakin) and decomposes the goal. A design panel proposes rival approaches that independent critics red team, so the plan is stress tested before any code exists. Builders each own a disjoint slice and ship it against a frozen contract, while independent verifiers accept work they did not write and surface what is missing. The output is a roadmap, a clean diff, and a readiness score you can defend from that diff.
-
-Same three execution modes as its sibling (Parallel Teams, Sequential Slices, Solo), so it runs on any host whether or not it spawns subagents. It writes only under `.mission-control/`, so it never collides with a review sprint, and recommends one when the build is done to harden the result.
-
-Use it when you want to plan and build a large feature or roadmap, break a big ambiguous idea into a sequenced plan, weigh competing architectures before committing, or coordinate several agents to ship something new without them colliding.
+Both modes run the same five phases, the same three execution modes (Parallel Teams for many parallel subagents, Sequential Slices for serial ones, Solo for hosts with no subagent primitive at all), the same one structured handoff per agent, and the same ready or blocked verdict backed by named checks. The agent count is sized from the repo's real module boundaries, not a fixed shape.
 
 ## Repo layout
 
 ```
 agentique/
 └── skills/
-    ├── anakin-mission-control/
-    │   ├── SKILL.md
-    │   └── references/
-    │       ├── execution-modes.md
-    │       ├── handoff-schemas.md
-    │       └── roadmap-and-decomposition.md
-    └── jarvis-snowden-academy/
+    └── agent-sprint/
         ├── SKILL.md
         └── references/
-            ├── execution-modes.md
-            ├── handoff-schemas.md
-            └── partition-guide.md
+            ├── protocol.md          # the spine: one invariant, mantra, flow rules, five phases
+            ├── execution-modes.md   # the three execution modes, VCS isolation, budgets
+            ├── handoff-schemas.md   # the one structured handoff artifact and verdict rubric
+            ├── build-delta.md       # Phase 1 for mode: build
+            └── review-delta.md      # Phase 1 for mode: review
 ```
 
 The CLI auto-discovers any directory under `skills/` that contains a `SKILL.md` with a `name` and `description` in its YAML frontmatter. Adding a new skill is a matter of dropping a new folder in.
+
+> Previous releases shipped this as two skills, `anakin-mission-control` (build) and `jarvis-snowden-academy` (review). They are now one `agent-sprint` skill with a `mode` switch over a single shared spine, since skills.sh installs one skill directory at a time and the two shared ~70% of their text.
 
 ## License
 
