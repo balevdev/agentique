@@ -11,14 +11,14 @@ Distributed through the open [skills.sh](https://skills.sh) ecosystem.
 npx skills add balevdev/agentique
 
 # or pick a single skill
-npx skills add balevdev/agentique --skill agent-sprint
+npx skills add balevdev/agentique --skill jarvis-anakin-mission
 ```
 
 Pass `-g` for a global install, or `-a claude-code` (etc.) to target one agent. See `npx skills add --help` for the full set.
 
 ## Skills in this repo
 
-### [`agent-sprint`](skills/agent-sprint/SKILL.md)
+### [`jarvis-anakin-mission`](skills/jarvis-anakin-mission/SKILL.md)
 
 A drop-in, harness-agnostic protocol for pointing a disciplined team of agents at one repo. One agent conducts; owners each take a disjoint slice; independent verifiers accept the work they did not write. The output is a roadmap or capability map, a clean diff, and a result you can defend from that diff. It runs in one of two modes, chosen by intent, over a single shared spine.
 
@@ -33,7 +33,7 @@ Both modes run the same five phases, the same three execution modes (Parallel Te
 ```
 agentique/
 └── skills/
-    └── agent-sprint/
+    └── jarvis-anakin-mission/
         ├── SKILL.md
         └── references/
             ├── protocol.md          # the spine: one invariant, mantra, flow rules, five phases
@@ -45,7 +45,7 @@ agentique/
 
 The CLI auto-discovers any directory under `skills/` that contains a `SKILL.md` with a `name` and `description` in its YAML frontmatter. Adding a new skill is a matter of dropping a new folder in.
 
-> Previous releases shipped this as two skills, `anakin-mission-control` (build) and `jarvis-snowden-academy` (review). They are now one `agent-sprint` skill with a `mode` switch over a single shared spine, since skills.sh installs one skill directory at a time and the two shared ~70% of their text.
+> Previous releases shipped this as two skills, `anakin-mission-control` (build) and `jarvis-snowden-academy` (review). They are now one `jarvis-anakin-mission` skill with a `mode` switch over a single shared spine, since skills.sh installs one skill directory at a time and the two shared ~70% of their text.
 
 ## License
 
