@@ -69,15 +69,37 @@ so the script stays lean. Do not reintroduce the prose version of anything below
 |----------------------------|-------------|
 | Three execution modes (Parallel Teams, Sequential, Solo) | `parallel`, `pipeline`, or await in sequence. One mode: the script. |
 | "Orchestrator owns all spawning, tree one level deep" | Built in. Agents cannot spawn; `workflow()` nests one level only. |
-| One `report.json` per handoff, written to disk and parsed | `schema` on `agent()` returns a validated object into a script variable. |
+| Parsing a `report.json` to move a handoff between agents | `schema` on `agent()` returns a validated object into a script variable. The agent still writes the same object to `reports/` as the durable artifact (see below). |
 | "Re spawn a flaky agent once, then mark FAILED" | A skipped or failed agent returns `null`; `.filter(Boolean)` and re run in a loop. |
 | "Bound every loop" and the budget rules | Fixed counters in code, loop until dry, and `budget.remaining()`. |
 | Resumable via reading `SUMMARY.md` | `resumeFromRunId` plus the runtime's per agent journal cache. |
 
-What does not change: the planning artifacts on disk. `GROUNDING.md`, `SLICES.md`, the contracts,
-and in build mode `DESIGN.md`, are still written to disk by the session, because the owners and
-verifiers Read them. The handoff that moves to structured output is the per agent report, not the
-shared plan.
+What does not change: the disk artifacts. The planning artifacts (`GROUNDING.md`, `SLICES.md`, the
+contracts, and in build mode `DESIGN.md`) are written to disk by the session because the owners and
+verifiers Read them. The per agent report is ALSO written to disk, to `reports/<slice-id>.report.json`,
+in addition to being returned through `schema`. The structured return is what the script branches on;
+the file is the durable copy the session gate and the human read, and it is what survives if the
+session exits while the workflow is running, since resume is same session only and the in memory
+results are then lost. Structured output duplicates the report into a script variable; it does not
+replace the file.
+
+## At large scale
+
+The skill's spine scales, but two single session steps become the bottleneck on a genuinely large or
+unfamiliar repo, and one durability limit bites. Handle them deliberately.
+
+- The understand and ground step is one session pass and is the ceiling on a repo you do not already
+  know. When grounding a large unfamiliar repo, run a parallel reader workflow first (one reader per
+  subsystem, read only, a cheaper model is fine here) whose structured output you fold into
+  `GROUNDING.md` and `SLICES.md`, then approve the partition by hand before the build or review
+  workflow. On a repo with a proven partition from a prior run, skip this; the single pass is enough.
+- The gate is in the session and accumulates escalations, full suite output, and regression routing,
+  which is the same context pressure the workflow avoided. On a large run, offload regression triage to
+  a small helper workflow (see `recipes.md`) and keep the gate's own context lean.
+- Resume is same session only, so a long workflow plus a session exit loses every in memory result.
+  Keep any single workflow short enough that a session exit is survivable, lean on the disk reports for
+  durability, and split a very large sprint into sequential workflows with a session checkpoint between
+  rather than one workflow that runs for hours.
 
 ## Flow rules that still apply
 
@@ -126,10 +148,18 @@ right contracts and write reports to deterministic paths.
 ### Phase 2. Fan out owners (workflow)
 
 Each owner Reads `GROUNDING.md`, its contract, and has read only access to the rest. It writes only
-its slice's paths. build: write the contract's named acceptance checks first, then implement to make
-them go red to green with minimal blast radius; pre existing tests stay green. review: inventory the
-slice's capabilities at the level of public behavior, audit against the mantra and correctness, and
-fix inside the slice. Verify slice scoped only (the owner's package), never the full suite, to avoid
+its slice's paths. The contract is the owner's source of truth: it works from the contract's named
+findings and acceptance criteria and reads the specific files named, rather than re auditing the whole
+slice, because every extra file read dilutes the grounding the late edits act on. build: write the
+contract's named acceptance checks first, then implement to make them go red to green with minimal
+blast radius; pre existing tests stay green. review: inventory the slice's capabilities at the level of
+public behavior, audit against the mantra and correctness, and fix inside the slice.
+
+Two test cases, do not confuse them. A real correctness bug gets a test that FAILS on the old code and
+passes after the fix. A behaviour preserving change (a refactor, a move, a safe narrowing) gets a
+characterization test that PASSES on the current code first and must stay green through the change;
+"identical behaviour" is exactly what an LLM cannot self assess, so the pin down test, not the owner's
+claim, is the evidence. Verify slice scoped only (the owner's package), never the full suite, to avoid
 cache collisions between parallel owners. An owner touches a consumed seam only by escalating in its
 report, never by editing a seam it does not own.
 

@@ -1,6 +1,6 @@
 ---
 name: skywalker-workflows
-description: "Run the Anakin multi agent sprint natively as a Claude Code dynamic workflow, in build or review mode. The session plans (ground the repo, slice it into disjoint owners, freeze each slice's contract) then launches ONE workflow script that fans out the owners and the independent verifiers, and finally gates the result against baseline. build mode turns a feature or roadmap into shipped verified code; review mode audits, hardens, and fixes an existing repo. The workflow runtime holds the orchestration, so intermediate results stay in script variables instead of the session context, and structured agent output replaces on disk handoffs. Use this whenever the user wants the Anakin build or review sprint AND the Workflow tool is available, says run the sprint as a workflow, asks to fan out owners and verifiers as a workflow, or wants several agents pointed at one repo without collisions using Claude Code workflows. If the Workflow tool is NOT available (a host with pi agents, serial only subagents, or no subagents), use jarvis-anakin-mission instead; the protocol is identical, only the executor changes."
+description: "Run the Anakin multi agent sprint natively as a Claude Code dynamic workflow, in build or review mode. The session plans (ground the repo, slice it into disjoint owners, freeze each slice's contract) then launches ONE workflow script that fans out the owners and the independent verifiers, and finally gates the result against baseline. build mode turns a feature or roadmap into shipped verified code; review mode audits, hardens, and fixes an existing repo. The workflow runtime holds the orchestration, so intermediate results stay in script variables instead of the session context, and structured agent output carries the per agent handoffs (with a durable disk copy kept as the artifact the gate and the human read). Use this whenever the user wants the Anakin build or review sprint AND the Workflow tool is available, says run the sprint as a workflow, asks to fan out owners and verifiers as a workflow, or wants several agents pointed at one repo without collisions using Claude Code workflows. If the Workflow tool is NOT available (a host with pi agents, serial only subagents, or no subagents), use jarvis-anakin-mission instead; the protocol is identical, only the executor changes."
 ---
 
 # Skywalker Workflows
@@ -43,7 +43,9 @@ so honor it:
 
 - `references/protocol.md`: the one invariant, the engineering mantra, the session vs workflow
   split, the phase to primitive map, and what the workflow form lets you drop. Read this first.
-- `references/recipes.md`: the copyable script idioms. The `meta` block, the owner preamble, the
-  owner and verifier output schemas (the on disk report reborn as structured output), a build
-  skeleton, the review delta, the failure and loop patterns, resume, and the plain JavaScript
-  gotchas. Read this when you author the script.
+- `references/recipes.md`: the copyable script idioms. The `meta` block, the owner preamble (with
+  context discipline), the owner and verifier output schemas (returned as structured output plus a
+  durable disk copy), the refute first verifier, a build skeleton, the review delta with discovered
+  seam sequencing, model routing and what NOT to route, the optional N voter and gate triage patterns,
+  the failure and loop patterns, resume, and the plain JavaScript gotchas. Read this when you author
+  the script.
