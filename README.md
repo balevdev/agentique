@@ -30,14 +30,36 @@ Both modes run the same five phases, the same three execution modes (Parallel Te
 
 ### [`skywalker-workflows`](skills/skywalker-workflows/SKILL.md)
 
-The same Anakin sprint, native to Claude Code dynamic workflows. Where `jarvis-anakin-mission` is harness agnostic and survives any host, this one assumes the Workflow tool is present and moves the orchestration into a script the runtime executes in the background. The protocol, the one invariant, the mantra, and the schemas are identical; only the executor changes.
+The same Anakin sprint, native to hosts that can coordinate many agents. In Pi, it uses the companion Skywalker extension plus `pi-subagents`: the extension collects the mission, then the parent agent grounds the repo, slices it into disjoint owners, approves contracts, launches owner/verifier chains, and gates the result. In Claude Code, it can still use dynamic workflows when the Workflow tool is present.
 
-The win is leanness. The session plans (grounds the repo, slices it into disjoint owners, freezes each contract), launches one workflow that fans out the owners and the cross assigned verifiers, then gates the result against baseline. The runtime holds the orchestration, so the session context keeps the plan and the final verdict and never the turn by turn transcript of every agent. Structured agent output replaces the on disk report, and the runtime gives you concurrency caps, failure as a null, loop until dry, and resume for free, so the script carries none of the survive any host machinery the harness agnostic skill needs. Reach for it when the slice count is more than a couple and the Workflow tool is available; fall back to `jarvis-anakin-mission` when it is not.
+The win is leanness. The session plans (grounds the repo, slices it into disjoint owners, freezes each contract), launches one runtime fanout that runs owners and cross assigned verifiers, then gates the result against baseline. Pi uses async subagent chains and file artifacts; Claude Code uses workflow script variables and runtime status. Reach for it when the slice count is more than a couple, when you want Claude Code workflow-style orchestration in Pi, or when independent verifiers need to accept work they did not write.
+
+### [`extensions/skywalker`](extensions/skywalker/index.ts)
+
+A Pi companion extension for `skywalker-workflows`. It registers `/skywalker`, `/skywalker-preview`, `/skywalker-status`, and `/skywalker-clear`. The extension does not edit code or spawn subagents directly; it creates a structured kickoff prompt so the parent Pi agent remains the orchestrator.
+
+To install manually into Pi:
+
+```bash
+mkdir -p ~/.pi/agent/extensions/skywalker
+cp extensions/skywalker/index.ts ~/.pi/agent/extensions/skywalker/index.ts
+/reload
+```
+
+Then run:
+
+```text
+/skywalker review apps/api --concurrency 4 --worktree single-tree
+```
 
 ## Repo layout
 
 ```
 agentique/
+├── extensions/
+│   └── skywalker/
+│       ├── index.ts                 # Pi companion slash commands and TUI wizard
+│       └── extension.test.ts        # behavior tests for prompt/status state
 └── skills/
     ├── jarvis-anakin-mission/
     │   ├── SKILL.md
@@ -50,8 +72,9 @@ agentique/
     └── skywalker-workflows/
         ├── SKILL.md
         └── references/
-            ├── protocol.md          # the invariant, mantra, session vs workflow split, phase map
-            └── recipes.md           # copyable script: meta, schemas, build skeleton, review delta
+            ├── pi-subagent-runtime.md # Pi-native phase map and chain shapes
+            ├── protocol.md            # the invariant, mantra, session vs workflow split, phase map
+            └── recipes.md             # copyable script: meta, schemas, build skeleton, review delta
 ```
 
 The CLI auto-discovers any directory under `skills/` that contains a `SKILL.md` with a `name` and `description` in its YAML frontmatter. Adding a new skill is a matter of dropping a new folder in.

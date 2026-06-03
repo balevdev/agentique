@@ -1,28 +1,33 @@
 ---
 name: skywalker-workflows
-description: "Run the Anakin multi agent sprint natively as a Claude Code dynamic workflow, in build or review mode. The session plans (ground the repo, slice it into disjoint owners, freeze each slice's contract) then launches ONE workflow script that fans out the owners and the independent verifiers, and finally gates the result against baseline. build mode turns a feature or roadmap into shipped verified code; review mode audits, hardens, and fixes an existing repo. The workflow runtime holds the orchestration, so intermediate results stay in script variables instead of the session context, and structured agent output carries the per agent handoffs (with a durable disk copy kept as the artifact the gate and the human read). Use this whenever the user wants the Anakin build or review sprint AND the Workflow tool is available, says run the sprint as a workflow, asks to fan out owners and verifiers as a workflow, or wants several agents pointed at one repo without collisions using Claude Code workflows. If the Workflow tool is NOT available (a host with pi agents, serial only subagents, or no subagents), use jarvis-anakin-mission instead; the protocol is identical, only the executor changes."
+description: "Run an Anakin/Skywalker multi-agent sprint in build or review mode. Use for big features, roadmap builds, repo audits, hardening passes, parallel owner/verifier work, or requests to run Claude Code-style workflows. In Pi, prefer the Skywalker extension plus pi-subagents: ground, slice, approve contracts, run owners, run independent verifiers, then gate in the parent session. In Claude Code with the Workflow tool, use dynamic workflows. If neither workflows nor subagents exist, fall back to jarvis-anakin-mission."
 ---
 
 # Skywalker Workflows
 
-The Anakin agent sprint, expressed as a Claude Code dynamic workflow. Same protocol as
+The Anakin agent sprint for hosts that can coordinate many agents. Same protocol as
 `jarvis-anakin-mission`: one orchestrator, owners who each hold a disjoint slice, and independent
-verifiers who accept work they did not write. The difference is the executor. Here the
-orchestration lives in a workflow script the runtime executes in the background, so the session
-context holds only the plan and the final verdict, not the turn by turn transcript of every agent.
+verifiers who accept work they did not write. The difference is the executor.
 
-Use this when the Workflow tool is available. If it is not (a pi agent host, serial only
-subagents, or no subagents at all), use `jarvis-anakin-mission`; the invariant, the mantra, the
-phases, and the schemas are identical, and only who runs each phase changes.
+Runtime selection:
+
+1. **Pi agent with `pi-subagents` and the Skywalker extension:** use the Pi-native runtime in
+   `references/pi-subagent-runtime.md`. The extension collects the mission and the parent agent
+   launches async subagent chains. This is the preferred Pi path.
+2. **Claude Code with the Workflow tool:** use the dynamic workflow runtime in
+   `references/protocol.md` and `references/recipes.md`.
+3. **No workflow tool and no usable subagents:** fall back to `jarvis-anakin-mission`; the invariant,
+   phases, and schemas are identical, only the executor changes.
 
 ## When this beats hand spawning
 
-Reach for the workflow form when the slice count is more than a couple, when you want the
-orchestration as a script you can read, rerun, and resume, or when you want a quality pattern
-baked in (cross assigned verifiers, adversarial refute, loop until dry). For one or two slices,
-hand spawning with the Agent tool is simpler and you should prefer it.
+Reach for Skywalker when the slice count is more than a couple, when you want a durable run shape
+that can be inspected or repeated, or when you want a quality pattern baked in (cross assigned
+verifiers, adversarial refute, loop until dry). In Pi, prefer the extension command `/skywalker`
+for interactive setup and use `subagent` chains for the actual owner/verifier fanout. For one or
+two slices, hand spawning with the Agent or `subagent` tool is simpler and you should prefer it.
 
-## The shape: plan in the session, fan out in the workflow, gate in the session
+## The shape: plan in the session, fan out in the runtime, gate in the session
 
 The protocol splits across two contexts at the one natural seam. The split is the whole design,
 so honor it:
@@ -31,21 +36,20 @@ so honor it:
    This needs iteration and your approval, so it stays in the main loop. Write `GROUNDING.md`,
    `SLICES.md`, the per slice contracts, and in build mode `DESIGN.md`, to disk. Approve the
    contracts before any code is written.
-2. **Fan out (workflow).** Author ONE workflow script that spawns the owners and the independent
-   verifiers, and launch it. It returns structured verdicts into a script variable, not prose into
-   your context. A workflow takes no mid run input, which is exactly why planning and sign off
-   happen before it, never inside it.
+2. **Fan out (runtime).** In Claude Code, author ONE workflow script that spawns the owners and
+   independent verifiers. In Pi, launch ONE async `subagent` chain or a small sequence of chains
+   with named phases and file-only artifacts. Either way, planning and sign off happen before
+   fanout, never inside it.
 3. **Gate (session).** When the workflow returns, run the full repo suite yourself against the
    baseline, route regressions back to their owning slice, and write `SUMMARY.md`. The gate needs
    full repo shell and judgment, so it belongs in the session, not the script.
 
 ## Reference files
 
+- `references/pi-subagent-runtime.md`: Pi-native phase mapping, safe chain shapes, artifacts,
+  status, and gate rules. Read this first when running inside Pi.
 - `references/protocol.md`: the one invariant, the engineering mantra, the session vs workflow
-  split, the phase to primitive map, and what the workflow form lets you drop. Read this first.
-- `references/recipes.md`: the copyable script idioms. The `meta` block, the owner preamble (with
-  context discipline), the owner and verifier output schemas (returned as structured output plus a
-  durable disk copy), the refute first verifier, a build skeleton, the review delta with discovered
-  seam sequencing, model routing and what NOT to route, the optional N voter and gate triage patterns,
-  the failure and loop patterns, resume, and the plain JavaScript gotchas. Read this when you author
-  the script.
+  split, the phase to primitive map, and what the workflow form lets you drop. Read this for
+  Claude Code dynamic workflows or for the shared protocol.
+- `references/recipes.md`: the copyable Claude Code workflow script idioms. Read this when you
+  author a dynamic workflow script.
