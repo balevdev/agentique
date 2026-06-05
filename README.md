@@ -34,6 +34,12 @@ The same Anakin sprint, native to hosts that can coordinate many agents. In Pi, 
 
 The win is leanness. The session plans (grounds the repo, slices it into disjoint owners, freezes each contract), launches one runtime fanout that runs owners and cross assigned verifiers, then gates the result against baseline. Pi uses async subagent chains and file artifacts; Claude Code uses workflow script variables and runtime status. Reach for it when the slice count is more than a couple, when you want Claude Code workflow-style orchestration in Pi, or when independent verifiers need to accept work they did not write.
 
+### [`anakin-galaxy`](skills/anakin-galaxy/SKILL.md)
+
+The Anakin sprint grown into a software factory: repeated runs over one repo where every run's output is the next run's mandatory input. Within a run it is the familiar shape (ground, slice, frozen contracts, parallel owners, adversarial verifiers, two-sided gate). Between runs a small deterministic CLI (`scripts/galaxy.ts`, bun, zero runtime deps) closes the loop: `recall` rehydrates a session from hash-stamped factory state in one call, `persist` refuses to end a run while any residual risk is untriaged, the ledger turns verifier bounces into calibration data that pre-empts owners and scales verification in the next run, and an advisory ratchet computes how much human gating each slice class still needs, on evidence, with automatic demotion on any defect.
+
+Reach for it when sprints over a repo should compound instead of starting from amnesia: factory state lives in a committed `.galaxy/` directory, so any future session, machine, or human inherits the partition, decisions, conventions, open risks, and defect history.
+
 ### [`extensions/skywalker`](extensions/skywalker/index.ts)
 
 A Pi companion extension for `skywalker-workflows`. It registers `/skywalker`, `/skywalker-preview`, `/skywalker-status`, and `/skywalker-clear`. The extension does not edit code or spawn subagents directly; it creates a structured kickoff prompt so the parent Pi agent remains the orchestrator.
@@ -69,12 +75,22 @@ agentique/
     │       ├── handoff-schemas.md   # the one structured handoff artifact and verdict rubric
     │       ├── build-delta.md       # Phase 1 for mode: build
     │       └── review-delta.md      # Phase 1 for mode: review
-    └── skywalker-workflows/
+    ├── skywalker-workflows/
+    │   ├── SKILL.md
+    │   └── references/
+    │       ├── pi-subagent-runtime.md # Pi-native phase map and chain shapes
+    │       ├── protocol.md            # the invariant, mantra, session vs workflow split, phase map
+    │       └── recipes.md             # copyable script: meta, schemas, build skeleton, review delta
+    └── anakin-galaxy/
         ├── SKILL.md
-        └── references/
-            ├── pi-subagent-runtime.md # Pi-native phase map and chain shapes
-            ├── protocol.md            # the invariant, mantra, session vs workflow split, phase map
-            └── recipes.md             # copyable script: meta, schemas, build skeleton, review delta
+        ├── references/
+        │   ├── protocol.md            # phases -1 to 5, the invariant, session/workflow/CLI split
+        │   ├── memory.md              # .galaxy/ layout, run-report and recall schemas, staleness
+        │   ├── ratchet.md             # evidence-licensed autonomy, automatic demotion
+        │   └── recipes.md             # memory-fed workflow script idioms
+        └── scripts/
+            ├── galaxy.ts              # the factory CLI: init, recall, triage, persist, ratchet
+            └── galaxy.test.ts         # 41 behavior tests against real temp git repos
 ```
 
 The CLI auto-discovers any directory under `skills/` that contains a `SKILL.md` with a `name` and `description` in its YAML frontmatter. Adding a new skill is a matter of dropping a new folder in.

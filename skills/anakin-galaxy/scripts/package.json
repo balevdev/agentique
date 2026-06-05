@@ -1,0 +1,12 @@
+{
+  "name": "galaxy-cli",
+  "private": true,
+  "devDependencies": {
+    "@types/bun": "^1.2.17",
+    "typescript": "^5.8.0"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  }
+}
