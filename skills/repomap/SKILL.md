@@ -29,6 +29,15 @@ repomap init && repomap index
 Requires Node 22.13+ (built-in node:sqlite, nothing to compile). Every command works
 from any subdirectory; repomap walks upward to find `.repomap` the way git finds `.git`.
 
+## First: is this a repomap workspace?
+
+One cheap check decides everything: does a `.repomap/` directory exist at or above the
+working directory? If yes, use repomap as your retrieval layer for the rest of the
+session. If no, and the folder holds several git repos, offer `repomap init` to the
+user once (it only writes a local `.repomap/` folder); do not initialize or install
+anything uninvited, and fall back to your normal tools without ceremony. The skill
+should never cost you time in workspaces where repomap does not apply.
+
 ## The session habit
 
 At the start of any session in a repomap workspace, run:
@@ -41,6 +50,11 @@ It rehashes every file (sha1) and skips unchanged ones, so it is a fast no-op wh
 nothing changed and it guarantees the index matches the working tree. Source files are
 always the truth; the index is derived data. If results ever look wrong, `repomap index
 --force` rebuilds everything.
+
+Know the cost shape so you spend wisely: `ask` and `graph` are milliseconds, `index` is
+about a second per few thousand files, `--force` and the first `--deep` run rebuild a
+lot. Do not run `--deep` as a session habit; reach for it the first time a task
+actually needs call chains.
 
 ## Choosing the right tool
 
@@ -119,9 +133,13 @@ the same SQLite index.
 3. Verify before editing. Citations tell you where to look; Read the actual file before
    changing it. The index is for finding, not for editing blind.
 4. Use `graph --direction in` before modifying anything shared (a table, a heavily
-   imported file, an endpoint). Knowing the blast radius beats discovering it in review.
+   imported file, an endpoint, a deep-indexed function). Knowing the blast radius beats
+   discovering it in review.
 5. Trust the freshness signals. Wiki pages flag repos as STALE (commits landed after
    the last index) or dirty (uncommitted edits); `repomap index` resolves both.
+6. Empty results are information, not a dead end. Reindex once, broaden the terms, and
+   if repomap still finds nothing, fall back to grep in the most likely repo. repomap
+   narrows where you look; it never forbids looking.
 
 ## Knowing the limits
 
