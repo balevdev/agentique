@@ -1,6 +1,6 @@
 ---
 name: repomap
-description: "Index, search, and graph-traverse multi-repo workspaces with the repomap CLI/MCP tool so every claim about code comes with a repo/file:line citation. Use this whenever work spans more than one repository in a folder: finding where a symbol, table, endpoint, env var, or package is defined or used; impact analysis before a change (who imports this file, who reads or writes this table); orienting in an unfamiliar workspace or microservice fleet; or any moment you are about to grep, glob, or read files across repos to answer a question. Also use it when a folder contains a .repomap directory, when the user mentions repomap, a code index, a knowledge graph of their repos, or cross-repo or cross-service research, or when long flows are burning tokens on repeated file reading."
+description: "Index, search, and graph-traverse multi-repo workspaces with the repomap CLI/MCP tool so every claim about code comes with a repo/file:line citation. Use this whenever work spans more than one repository in a folder: finding where a symbol, table, endpoint, env var, or package is defined or used; impact analysis before a change (who imports this file, who calls this function, who reads or writes this table); orienting in an unfamiliar workspace or microservice fleet; or any moment you are about to grep, glob, or read files across repos to answer a question. Also use it when a folder contains a .repomap directory, when the user mentions repomap, a code index, a call graph, a knowledge graph of their repos, or cross-repo or cross-service research, or when long flows are burning tokens on repeated file reading."
 ---
 
 # repomap: cited cross-repo retrieval
@@ -49,6 +49,8 @@ always the truth; the index is derived data. If results ever look wrong, `repoma
 | Find a symbol, phrase, env var, package | `repomap ask "DATABASE_URL" --json` |
 | Search one repo only | `repomap ask "licence" --repo my-api --json` |
 | Who depends on this file (blast radius) | `repomap graph "file:my-api/src/auth.ts" --direction in --depth 2 --json` |
+| Who calls this function (needs deep mode) | `repomap graph "function:my-api/src/auth.ts#validate" --direction in --json` |
+| Who extends or implements a type (deep) | `repomap graph "type:my-api/src/users.ts#User" --direction in --json` |
 | Who defines, reads, writes a table | `repomap graph "table:users" --direction in --json` |
 | Every importer of a package or module | `repomap graph "module:dataloader" --direction in --json` |
 | What a file imports or defines | `repomap graph "file:my-api/src/server.ts" --direction out --json` |
@@ -61,11 +63,33 @@ Graph node keys are plain strings; exact key matches win, substrings work as fal
 ```text
 file:<repo>/<path>   table:<name>   endpoint:<VERB /path>   collection:<slug>
 package:<ecosystem>:<name>   module:<import specifier>   repo:<path>
+function:<repo>/<path>#<name>   type:<repo>/<path>#<name>   (deep mode)
 ```
 
 `--direction in` answers "who uses this" (impact analysis). `--direction out` answers
 "what does this use". Depth runs 1 to 4; start at 1 and widen only if you need the
-transitive picture.
+transitive picture. A substring like `"#validateLicence"` matches function and type
+nodes without spelling out the full key.
+
+## Deep mode: the TS/JS call graph
+
+```bash
+repomap index --deep
+```
+
+Deep mode parses TypeScript and JavaScript with the TypeScript compiler API and adds
+edges regex cannot see: file defines `function:`/`type:` nodes, file `calls` imported
+functions, and classes `extends`/`implements` types. That turns "who calls this
+function" and "who implements this interface" into one graph query instead of a grep
+plus guesswork.
+
+It is opt-in and conservative: only named and namespace imports from relative paths
+that resolve to a real file produce call edges, so every edge is provably true. It
+needs the `typescript` package (in the indexed repo or globally); without it the
+command fails loud with install instructions. Run it once per workspace: later plain
+`repomap index` runs keep the deep edges for unchanged files at no extra cost. Use it
+when the task involves call chains, refactoring shared functions, or interface
+contracts across services; plain indexing already covers search and import graphs.
 
 ## MCP integration
 
@@ -106,5 +130,8 @@ expect occasional noise nodes such as a `table:` entry harvested from prose that
 resembled SQL. Citations make noise trivially dismissable: check the cited line. Symbol
 coverage spans TypeScript, JavaScript, Python, Go, Rust, Java, Kotlin, Ruby, PHP, C#,
 SQL, Prisma, and GraphQL; import edges resolve for TypeScript, JavaScript, Python, and
-Go. If a query returns nothing, reindex first, then try broader or fewer terms; multi
-word queries fall back from AND to OR automatically.
+Go. Deep mode covers TypeScript and JavaScript only, and skips default imports and
+package imports on purpose: an absent call edge means "not provable", not "not called".
+If a query returns nothing, reindex first (with `--deep` for function and type nodes),
+then try broader or fewer terms; multi word queries fall back from AND to OR
+automatically.

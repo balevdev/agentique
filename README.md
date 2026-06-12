@@ -42,7 +42,7 @@ Reach for it when sprints over a repo should compound instead of starting from a
 
 ### [`repomap`](skills/repomap/SKILL.md)
 
-Cited cross-repo retrieval for any agent working in a folder of many git repositories. It teaches the agent to use the [`repo-map`](https://www.npmjs.com/package/repo-map) CLI/MCP tool: index every repo into one local SQLite file, search with `repo/file:line` citations, traverse the code graph (who imports this file, who reads or writes this table, blast radius before a change), and orient from generated per-repo wiki pages. No server, no API keys; the index is derived data and always rebuildable.
+Cited cross-repo retrieval for any agent working in a folder of many git repositories. It teaches the agent to use the [`repo-map`](https://www.npmjs.com/package/repo-map) CLI/MCP tool: index every repo into one local SQLite file, search with `repo/file:line` citations, traverse the code graph (who imports this file, who calls this function, who reads or writes this table, blast radius before a change), and orient from generated per-repo wiki pages. An optional deep mode parses TS/JS with the TypeScript compiler API for a provably-true call graph. No server, no API keys; the index is derived data and always rebuildable.
 
 Reach for it when work spans more than one repo: it replaces token-hungry cross-repo grepping with one cheap query, and its citation discipline (never assert a cross-repo fact you cannot cite, Read the cited file before editing) keeps agents from hallucinating code that does not exist.
 
