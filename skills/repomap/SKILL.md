@@ -98,12 +98,18 @@ function" and "who implements this interface" into one graph query instead of a 
 plus guesswork.
 
 It is opt-in and conservative: only named and namespace imports from relative paths
-that resolve to a real file produce call edges, so every edge is provably true. It
-needs the `typescript` package (in the indexed repo or globally); without it the
-command fails loud with install instructions. Run it once per workspace: later plain
-`repomap index` runs keep the deep edges for unchanged files at no extra cost. Use it
-when the task involves call chains, refactoring shared functions, or interface
-contracts across services; plain indexing already covers search and import graphs.
+that resolve to a real file produce call edges. Default and package imports are
+skipped, not guessed, so an absent call edge means "not provable", never "not called".
+One trap to know: a function re-exported through a barrel file (`export { x } from
+'./x.js'`) gets its calls attributed to the barrel, so an exact `function:` key on the
+defining file can show zero callers. When that happens, query the substring instead
+(`repomap graph "#myFunction" --direction in`) and you catch callers through barrels
+too. Deep mode needs the `typescript` package (in the indexed repo or globally);
+without it the command fails loud with install instructions. Run it once per
+workspace: later plain `repomap index` runs keep the deep edges for unchanged files at
+no extra cost. Use it when the task involves call chains, refactoring shared
+functions, or interface contracts across services; plain indexing already covers
+search and import graphs.
 
 ## MCP integration
 
