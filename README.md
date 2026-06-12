@@ -40,6 +40,12 @@ The Anakin sprint grown into a software factory: repeated runs over one repo whe
 
 Reach for it when sprints over a repo should compound instead of starting from amnesia: factory state lives in a committed `.galaxy/` directory, so any future session, machine, or human inherits the partition, decisions, conventions, open risks, and defect history.
 
+### [`repomap`](skills/repomap/SKILL.md)
+
+Cited cross-repo retrieval for any agent working in a folder of many git repositories. It teaches the agent to use the [`repo-map`](https://www.npmjs.com/package/repo-map) CLI/MCP tool: index every repo into one local SQLite file, search with `repo/file:line` citations, traverse the code graph (who imports this file, who reads or writes this table, blast radius before a change), and orient from generated per-repo wiki pages. No server, no API keys; the index is derived data and always rebuildable.
+
+Reach for it when work spans more than one repo: it replaces token-hungry cross-repo grepping with one cheap query, and its citation discipline (never assert a cross-repo fact you cannot cite, Read the cited file before editing) keeps agents from hallucinating code that does not exist.
+
 ### [`extensions/skywalker`](extensions/skywalker/index.ts)
 
 A Pi companion extension for `skywalker-workflows`. It registers `/skywalker`, `/skywalker-preview`, `/skywalker-status`, and `/skywalker-clear`. The extension does not edit code or spawn subagents directly; it creates a structured kickoff prompt so the parent Pi agent remains the orchestrator.
