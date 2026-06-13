@@ -40,11 +40,11 @@ The Anakin sprint grown into a software factory: repeated runs over one repo whe
 
 Reach for it when sprints over a repo should compound instead of starting from amnesia: factory state lives in a committed `.galaxy/` directory, so any future session, machine, or human inherits the partition, decisions, conventions, open risks, and defect history.
 
-### [`repomap`](skills/repomap/SKILL.md)
+### [`vader`](skills/vader/SKILL.md)
 
-Cited cross-repo retrieval for any agent working in a folder of many git repositories. It teaches the agent to use the [`repo-map`](https://www.npmjs.com/package/repo-map) CLI/MCP tool: index every repo into one local SQLite file, search with `repo/file:line` citations, traverse the code graph (who imports this file, who calls this function, who reads or writes this table, blast radius before a change), and orient from generated per-repo wiki pages. An optional deep mode parses TS/JS with the TypeScript compiler API for a provably-true call graph. No server, no API keys; the index is derived data and always rebuildable.
+An app-agnostic software factory for `/loop`: one idea becomes a deep spec, a protected constitution, and shipped code, built one roadmap item per tick in any repo root, with no architecture decay. The premise is that an agent loop is a box with no memory of what it meant, so the meaning lives outside the box. A human authors a `constitution.model` that names the semantic distinctions that must never collapse (a temporal point is not a temporal interval; common must not import etl) as four invariant kinds: `shape`, `dependency`, `data`, and `behavioral`, plus a `rawCheck` escape. A router (`vader gen`) compiles each one into the strongest deterministic check the target toolchain allows: TypeScript gets real compile errors from branded types and `@ts-expect-error`, every other language gets a generated property test or AST scan floor. When an agent collapses a distinction, `vader gate` fails on a named invariant id, which is an automatic verifier bounce.
 
-Reach for it when work spans more than one repo: it replaces token-hungry cross-repo grepping with one cheap query, and its citation discipline (never assert a cross-repo fact you cannot cite, Read the cited file before editing) keeps agents from hallucinating code that does not exist.
+The loop runs on two human gates and nothing else: freeze the model at conceive, approve any later model change. Between them the build is autonomous (gate the model, free the code). An anti-decay lock makes the model a protected artifact: owners can make code fail the gate but cannot edit `constitution.model.*` or `generated/` to silence it, and the gate fails closed if the locked model hash no longer matches. The CLI (`scripts/vader.ts`, bun, zero runtime deps) owns a committed `.vader/` directory: `init`, `gen`, `gate`, `recall`, `persist`. Reach for it to build an app from a spec autonomously over many ticks while a compiled constitution holds the architecture in place.
 
 ### [`extensions/skywalker`](extensions/skywalker/index.ts)
 
@@ -87,16 +87,27 @@ agentique/
     │       ├── pi-subagent-runtime.md # Pi-native phase map and chain shapes
     │       ├── protocol.md            # the invariant, mantra, session vs workflow split, phase map
     │       └── recipes.md             # copyable script: meta, schemas, build skeleton, review delta
-    └── anakin-galaxy/
-        ├── SKILL.md
+    ├── anakin-galaxy/
+    │   ├── SKILL.md
+    │   ├── references/
+    │   │   ├── protocol.md            # phases -1 to 5, the invariant, session/workflow/CLI split
+    │   │   ├── memory.md              # .galaxy/ layout, run-report and recall schemas, staleness
+    │   │   ├── ratchet.md             # evidence-licensed autonomy, automatic demotion
+    │   │   └── recipes.md             # memory-fed workflow script idioms
+    │   └── scripts/
+    │       ├── galaxy.ts              # the factory CLI: init, recall, triage, persist, ratchet
+    │       └── galaxy.test.ts         # 41 behavior tests against real temp git repos
+    └── vader/
+        ├── SKILL.md                   # the loop, two human gates, anti-decay lock, CLI surface
         ├── references/
-        │   ├── protocol.md            # phases -1 to 5, the invariant, session/workflow/CLI split
-        │   ├── memory.md              # .galaxy/ layout, run-report and recall schemas, staleness
-        │   ├── ratchet.md             # evidence-licensed autonomy, automatic demotion
-        │   └── recipes.md             # memory-fed workflow script idioms
+        │   ├── protocol.md            # phases P-1 to P4, the tick, the gates
+        │   └── constitution.md        # the four invariant kinds, worked examples, rawCheck escape
+        ├── commands/
+        │   └── vader.md               # the /vader tick driver for /loop
         └── scripts/
-            ├── galaxy.ts              # the factory CLI: init, recall, triage, persist, ratchet
-            └── galaxy.test.ts         # 41 behavior tests against real temp git repos
+            ├── vader.ts               # the factory CLI: init, gen, gate, recall, persist
+            ├── vader.test.ts          # behavior tests against real temp repos
+            └── dogfood.test.ts        # end-to-end proof: a collapsed boundary fails the gate by id
 ```
 
 The CLI auto-discovers any directory under `skills/` that contains a `SKILL.md` with a `name` and `description` in its YAML frontmatter. Adding a new skill is a matter of dropping a new folder in.
