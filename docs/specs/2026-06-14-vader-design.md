@@ -121,7 +121,7 @@ Implementer agents can make code fail the gate; they physically cannot edit `con
 
 - Lives at `agentique/skills/vader/` with `SKILL.md`, `scripts/vader.ts` (bun, zero runtime deps, mirrors `galaxy.ts`), `references/protocol.md`.
 - Distributed via skills.sh: `npx skills add balevdev/agentique --skill vader`.
-- `vader init` scaffolds `.vader/` into any repo and writes `gate.json` by detecting the toolchain. Nothing global, nothing repo-specific baked in.
+- `vader init` scaffolds `.vader/` into any repo and writes `gate.json` by detecting the toolchain. When no toolchain is detected it scaffolds a stub `gate.json` (with a clearly marked placeholder check command) for the operator to fill, rather than refusing to run. Nothing global, nothing repo-specific baked in.
 
 ## Validation strategy
 
@@ -131,15 +131,9 @@ Implementer agents can make code fail the gate; they physically cannot edit `con
 
 ## Risks and assumptions
 
-- **R1 Router breadth.** The four-kind taxonomy may not cover every real invariant. Mitigation: an `escape: { rawCheck: "<command>" }` check form lets any invariant attach an arbitrary command at the floor while we learn the taxonomy.
+- **R1 Router breadth.** The four-kind taxonomy (shape, dependency, behavioral, data) is the deliberate v1 starting set; we do not add speculative kinds (no performance/SLA kind up front). An `escape: { rawCheck: "<command>" }` check form lets any invariant that does not fit attach an arbitrary command at the floor, so we extend the taxonomy on evidence rather than guessing it.
 - **R2 Spec quality gates everything.** A weak `SPEC.md`/model produces a weak factory output. Mitigation: P0 is human-gated and may loop with `deep-research`; the model can only be ratcheted up autonomously, never down.
 - **R3 Autonomy stall.** "Gate the model" means a missing invariant can block a slice until a human approves a model change. Accepted by design: a stall that asks for human steering beats silent decay.
 - **R4 Worktree/gate attribution.** Carried forward from galaxy: parallel owners need worktree isolation or verifier out-of-bounds checks see the union of edits. Encoded in the P2 owner preamble.
 - **A1** Target repos have a resolvable single gate command (or vader can compose one) at P-1.
 - **A2** `Workflow` (or an equivalent fan-out primitive) is available in the host; Solo fallback exists for hosts without subagents, as in `jarvis-anakin-mission`.
-
-## Open questions for review
-
-1. Should `vader init` refuse to run in a repo with no detectable toolchain, or scaffold a minimal `gate.json` for the operator to fill?
-2. Is the four-kind invariant taxonomy the right starting set, or do we want a fifth kind up front (for example, performance/SLA invariants)?
-3. Does the spec belong in `agentique/docs/specs/` (here) or should it live under the eventual `skills/vader/` directory once the skill exists?
