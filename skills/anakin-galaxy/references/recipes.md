@@ -73,6 +73,13 @@ RULES:
 - Pre-existing baseline reds in GROUNDING.md are not yours to fix or blame.
 - CONTEXT DISCIPLINE: the contract is the source of truth. Read the files it names; do not
   re-audit the slice. If the contract is wrong, escalate in your report, never expand scope.
+- INVARIANTS are hard. Any AC tagged \`[INVARIANT]\` is a distinction the architecture must
+  preserve; satisfy its Check exactly, never collapse it to make a test pass. If correctness
+  forces a conflict, escalate, do not blur it.
+- Use the repomap index before fanning out file reads: \`repomap ask\` to locate a symbol,
+  \`repomap graph "#fn" --direction in\` for blast radius before you touch shared code. Verify
+  every hit against the real file; do not trust a "0 reads/writes" table for Drizzle ORM
+  tables (repomap only sees raw SQL).
 - A real bug fix gets a test that FAILS on the old code. A behaviour-preserving change gets a
   characterization test that PASSES on the current code first and stays green.
 - Return the schema object AND write it to ${RUN}/reports/${s.id}.report.json.
@@ -137,8 +144,10 @@ const critique = await agent(
 ${RUN}/DESIGN.md, ${RUN}/SLICES.md and all ${RUN}/contracts/*.md.
 Red team: (a) are the slice paths truly disjoint? (b) is each frozen seam sufficient for its
 consumers? (c) does any contract force a mantra violation? (d) does the design contradict a
-recorded decision in DECISIONS.md? A contradiction is a revise unless the design explicitly
-supersedes it.`,
+recorded decision in DECISIONS.md? (e) does any slice touch an invariant's domain without
+restating that invariant as an \`[INVARIANT]\` AC in its contract, or carry an unstated
+assumption that should be an AC or a named risk? A contradiction or a missing invariant AC
+is a revise unless the design explicitly supersedes it.`,
   { label: 'critic', phase: 'Critique', schema: {
     type: 'object', additionalProperties: false, required: ['disjoint', 'risks', 'verdict'],
     properties: { disjoint: { type: 'boolean' }, risks: { type: 'array', items: { type: 'object' } },
@@ -158,7 +167,11 @@ function verifierPrompt(s, i) {
 Read ${RUN}/contracts/${s.contract} and ${ROOT}/.galaxy/GROUNDING.md. Inspect the REAL diff
 (git diff -- <paths>) and re-run the slice checks yourself in ${s.pkg}.
 STANCE: assume each AC is NOT met and try to refute it. Hollow checks and code-free claims are
-bounces. Default to "bounce: <reason>" when uncertain. Return the VERIFIER report object.`
+bounces. Default to "bounce: <reason>" when uncertain.
+INVARIANT RULE (mechanical, no judgment): for any AC tagged \`[INVARIANT]\`, run its Check
+against the REAL diff. If the Check fails, or the diff collapses the named Distinction to
+make a test pass, the result is "bounce: invariant <name>". This is not a taste call.
+Return the VERIFIER report object.`
 }
 async function verifySlice(s) {
   const votes = (await parallel(Array.from({ length: voterCount(s) }, (_, i) => () =>
