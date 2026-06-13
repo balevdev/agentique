@@ -49,12 +49,12 @@ The split is load-bearing and taken straight from the source idea: `SPEC.md` is 
 
 ## The pipeline (one arc, idea to shipped)
 
-- **P-1 Ground** — detect language/toolchain, refresh the repomap index, resolve the gate command into `gate.json`. The app-agnostic adapter layer.
-- **P0 Conceive** — idea -> deep `SPEC.md` (automated back-and-forth, pulls in `deep-research` for unknowns) -> first `constitution.model`. HUMAN GATE.
-- **P1 Decompose** — spec+model -> `ROADMAP.md` -> disjoint slices; critic red-teams; contracts frozen. Router emits `generated/` so owners code against real teeth.
-- **P2 Implement** — owners build against frozen contracts in worktree isolation (parallel file-mutating owners must use worktree isolation; forks come from the base sha).
-- **P3 Verify** — refute-first verifiers accept work they did not write; the gate (repo check + generated invariant checks) is the deterministic arbiter. An invariant id in the fail set is an automatic bounce, zero judgment.
-- **P4 Persist** — update state/ledger/ratchet. If a slice genuinely needs the model to change, that becomes a model-change proposal -> human gate, never auto-applied. This is the anti-decay lock.
+- **P-1 Ground**: detect language/toolchain, refresh the repomap index, resolve the gate command into `gate.json`. The app-agnostic adapter layer.
+- **P0 Conceive**: idea -> deep `SPEC.md` (automated back-and-forth, pulls in `deep-research` for unknowns) -> first `constitution.model`. HUMAN GATE.
+- **P1 Decompose**: spec+model -> `ROADMAP.md` -> disjoint slices; critic red-teams; contracts frozen. Router emits `generated/` so owners code against real teeth.
+- **P2 Implement**: owners build against frozen contracts in worktree isolation (parallel file-mutating owners must use worktree isolation; forks come from the base sha).
+- **P3 Verify**: refute-first verifiers accept work they did not write; the gate (repo check + generated invariant checks) is the deterministic arbiter. An invariant id in the fail set is an automatic bounce, zero judgment.
+- **P4 Persist**: update state/ledger/ratchet. If a slice genuinely needs the model to change, that becomes a model-change proposal -> human gate, never auto-applied. This is the anti-decay lock.
 
 ## The loop
 
@@ -91,10 +91,10 @@ export const constitution = {
 
 Invariants are tagged by one of four kinds, because checkability differs fundamentally:
 
-- **shape** — a semantic distinction in types/data (point vs interval).
-- **dependency** — a structural/import boundary.
-- **behavioral** — a property only provable by exercising behavior.
-- **data** — an algebraic law over values (deterministic id = hash of fields).
+- **shape**: a semantic distinction in types/data (point vs interval).
+- **dependency**: a structural/import boundary.
+- **behavioral**: a property only provable by exercising behavior.
+- **data**: an algebraic law over values (deterministic id = hash of fields).
 
 ### The router (model to teeth)
 
