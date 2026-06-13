@@ -54,6 +54,24 @@ No magic. No reflection-driven wiring. No decorators that hide control flow.
 The stack is fixed (Bun, Hono, Drizzle, TanStack, Base UI, Biome). Do not introduce
 a library the existing stack already covers.
 
+### 1.8 Invariants (named distinctions, enforced as ACs)
+Some distinctions are semantic, not structural, so the rules above cannot catch an owner
+who quietly collapses one to make a test pass (a point treated as an interval, money turned
+into a float). Each is written as an `[INVARIANT]` acceptance criterion in the contract of
+any slice that touches its domain (Phase 1), so a verifier bounces a violation mechanically.
+The shape is `[INVARIANT] <name>` plus a `Distinction:` line and a `Check:` line
+(`anakin-galaxy/references/memory.md`). The current catalog for this repo:
+
+| Invariant | Distinction | Check |
+|-----------|-------------|-------|
+| money-decimal-string | Money is a decimal string end to end; currency is part of every aggregation key | automatic bounce: `Number(` or `parseFloat(` on a fee in any display or persist path, or a SUM over money without currency in the GROUP BY (D-money-string-pipeline) |
+| observability-never-changes-outcome | A best-effort side channel (lineage, checkpoints) never alters a stage ack, NAK, or DLQ outcome | automatic bounce: a telemetry call outside the `safeObserve` try/catch in a worker (C10) |
+| locality-over-dry | Per-source variants that share only a leaf predicate stay separate; do not unify on coincidence | automatic bounce: a new shared helper merging two source structurers that share no real contract (GROUNDING non-smells) |
+| identifier-seam-decoupled | The `organisation_identifier` table is the cross-source spine; typed-identifier emission is a separate contracted build | automatic bounce: a structurer emitting typed identifiers with no contracted emission slice (R-entity-identifier-emission) |
+
+This catalog is a snapshot. An invariant proven durable across runs is frozen as an
+`[INVARIANT]`-tagged convention through `persist`, never by hand-editing `CONVENTIONS.md`.
+
 ---
 
 ## 2. The 5-File Domain Pattern
@@ -121,12 +139,16 @@ When loaded alongside `anakin-galaxy`, here is how you operate in each phase:
 
 ### Phase -1: Recall (you are the primary reader)
 
-1. Run `galaxy recall --root <repo>` — read the full JSON packet
-2. Read `.galaxy/GROUNDING.md` — verify stable layers against current code
-3. Read `.galaxy/DECISIONS.md` — check for decisions that contradict the current design
-4. Read `.galaxy/CONVENTIONS.md` — note frozen conventions for owner preambles
-5. Read `.galaxy/state.json` — note open risks, pending triage, current slices, last run bounces
+1. Run `galaxy recall --root <repo>`, read the full JSON packet
+2. Read `.galaxy/GROUNDING.md`, verify stable layers against current code
+3. Read `.galaxy/DECISIONS.md`, check for decisions that contradict the current design
+4. Read `.galaxy/CONVENTIONS.md`, note frozen conventions for owner preambles
+5. Read `.galaxy/state.json`, note open risks, pending triage, current slices, last run bounces
 6. **Verify before trust**: if a decision conflicts with reality, triage it (supersede or reaffirm)
+7. Run `repomap index` so the orientation layer is fresh; use `repomap ask` and
+   `repomap graph "#fn" --direction in` to locate symbols and blast radius instead of
+   fanning out file reads. Verify hits against the real file; do not trust a 0 reads/writes
+   table for Drizzle ORM tables (repomap only sees raw SQL)
 
 ### Phase 0: Ground (you refresh stale layers)
 
@@ -160,7 +182,11 @@ Only refresh what recall flagged as stale:
    - Names the slice's exclusive write paths
    - Lists ACs that are binary and checkable (a test, a lint pass, a count, a curl)
    - Declares `risk: high` for subtle correctness/concurrency/money/auth
-   - Does NOT prescribe implementation — only the surface and the acceptance criteria
+   - Does NOT prescribe implementation, only the surface and the acceptance criteria
+   - For any invariant whose domain the slice touches (1.8), restates it as an `[INVARIANT]`
+     AC carrying its Check, so the verifier bounces a violation mechanically
+   - Carries no implicit assumption: each becomes an AC or a named risk. An unstated
+     assumption that turns out false is a bounce, not a judgment call
 
 5. **Critic role** (red-team the design before it hits the workflow):
    - Are slice paths truly disjoint?

@@ -44,6 +44,13 @@ Applies to the code agents write, the workflow script, and the CLI itself.
 
 If correctness or a contract would force a violation, log a residual risk and escalate.
 
+An **invariant** is a distinction the mantra alone cannot enforce because it is semantic,
+not structural: a point is not an interval, money is a decimal string not a float, a
+best-effort side channel never changes a stage outcome. The factory keeps these from being
+quietly collapsed by writing each as an `[INVARIANT]` acceptance criterion in the contract
+of any slice that touches its domain (Phase 1), so a verifier can bounce a violation
+mechanically rather than by taste (Phase 3). The shape is in `memory.md`.
+
 ## Phase -1: Recall
 
 If `.galaxy/` does not exist yet, run `galaxy init` once (idempotent; recall on an
@@ -70,6 +77,11 @@ Refresh ONLY what recall flagged stale. The stable layer of `.galaxy/GROUNDING.m
 invalidated sections. Then run the real baseline fresh: build, typecheck, lint, test
 counts on the untouched repo. Baselines are NEVER cached or persisted; a stale baseline
 silently blames the team for pre-existing red or excuses a real regression.
+
+If the repo carries a `.repomap/` index, run `repomap index` once here (a no-op when
+nothing changed). It is the orientation layer for the whole run: owners and verifiers query
+it instead of fanning out file reads, which is where most of a run's tokens and wall-clock
+otherwise go.
 
 ## Phase 1: Compile
 

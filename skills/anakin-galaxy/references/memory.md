@@ -72,6 +72,30 @@ Field semantics:
 - `stamps`: include ONLY layers actually refreshed this run. Omitting `stamps` never
   un-stamps anything; persist without it leaves staleness exactly as it was.
 
+## Invariants: a convention or AC with a mechanical check
+
+A local change can be correct in its own module and still collapse a distinction the whole
+system depends on (a point silently treated as an interval, money silently turned into a
+float). An invariant is that distinction, written so a verifier can fail it without
+judgment. It is not a new file or a schema field; it is a tag plus two lines on an ordinary
+convention or acceptance criterion:
+
+```
+[INVARIANT] <one-line name>
+Distinction: the semantic point in one sentence (a point is not an interval).
+Check: exactly one mechanical enforcement: a test path, a lint/fallow rule, or
+  `automatic bounce: <trigger>` (the literal pattern a verifier greps the diff for).
+```
+
+Invariants travel through the checked surface, not by hand-editing the ledger. When a slice
+touches an invariant's domain, the contract author restates the invariant as an `[INVARIANT]`
+AC in that slice's contract (Phase 1), so the owner sees it and the verifier can bounce it
+mechanically (Phase 3). An invariant that proves durable across runs is frozen as an
+`[INVARIANT]`-tagged convention through a normal `persist`, exactly like any other
+convention, never by editing `CONVENTIONS.md` directly. The point of naming it is that an
+agent cannot quietly collapse the distinction: the verifier checks the named relation, not
+its own reading of a test that happens to pass.
+
 ## The recall packet (output of `galaxy recall`)
 
 ```json
