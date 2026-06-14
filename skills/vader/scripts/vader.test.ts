@@ -18,6 +18,8 @@ import {
   cmdRatchet,
   cmdRecall,
   globToRegExp,
+  flag,
+  parseGrant,
   type RunReport,
   type State,
 } from './vader.ts'
@@ -110,6 +112,45 @@ test('validateConstitution rejects duplicate ids', () => {
     ],
   }
   expect(() => validateConstitution(bad)).toThrow(/duplicate/)
+})
+
+test('validateConstitution rejects an id that would escape a generated filename', () => {
+  const bad = {
+    concepts: {},
+    invariants: [{ id: '../evil', kind: 'data', statement: 's', check: { rawCheck: 'true' } }],
+  }
+  expect(() => validateConstitution(bad)).toThrow(/id must match/)
+})
+
+test('validateConstitution rejects a distinct name that is not a TS identifier', () => {
+  const bad = {
+    concepts: {},
+    invariants: [{ id: 'pt', kind: 'shape', statement: 's', check: { distinct: ['Temporal Point', 'B'] } }],
+  }
+  expect(() => validateConstitution(bad)).toThrow(/TS identifier/)
+})
+
+// ---------- flag + parseGrant (arg parsing safety) ----------
+
+test('flag does not swallow the next flag as its value', () => {
+  const args = ['--grant', '--approved-by', 'human']
+  expect(flag(args, '--grant')).toBeUndefined()
+  expect(args).toEqual(['--approved-by', 'human'])
+})
+
+test('flag returns the value and consumes both tokens for a normal flag', () => {
+  const args = ['--grant', '3', 'tail']
+  expect(flag(args, '--grant')).toBe('3')
+  expect(args).toEqual(['tail'])
+})
+
+test('parseGrant accepts a non-negative integer and rejects everything else', () => {
+  expect(parseGrant('0')).toBe(0)
+  expect(parseGrant('2')).toBe(2)
+  expect(() => parseGrant('')).toThrow(/non-negative integer/)
+  expect(() => parseGrant('x')).toThrow(/non-negative integer/)
+  expect(() => parseGrant('-1')).toThrow(/non-negative integer/)
+  expect(() => parseGrant('1.5')).toThrow(/non-negative integer/)
 })
 
 // ---------- hash + glob ----------
@@ -411,6 +452,23 @@ test('AC6: persist advances grounding and partition stamps', () => {
   expect(st.partition.slices[0]!.id).toBe('P1')
 })
 
+test('AC6: re-persisting after a crash before the ledger append is idempotent', () => {
+  const root = tmpRepo()
+  cmdInit(root)
+  const rep = report({ run: { id: 'R1' }, decisions: [{ id: 'D1', title: 't', body: 'b' }] })
+  cmdPersist(root, rep)
+  // Simulate a crash AFTER state + prose were written but BEFORE the ledger run-line landed:
+  // the ledger is the commit marker, so wipe it and re-run the exact same report.
+  writeFileSync(paths(root).ledger, '')
+  cmdPersist(root, rep)
+  const st = loadState(root)
+  expect(st.decisions).toEqual(['D1'])
+  const decisions = readFileSync(paths(root).decisions, 'utf8')
+  expect(decisions.split('\n## D1: ').length).toBe(2) // exactly one occurrence
+  const runLines = readFileSync(paths(root).ledger, 'utf8').trim().split('\n').map((l) => JSON.parse(l)).filter((l) => l.type === 'run')
+  expect(runLines.length).toBe(1)
+})
+
 // ---------- AC5: triage ----------
 
 test('AC5: triage records a disposition and requires a reason', () => {
@@ -532,6 +590,36 @@ test('AC4: recall surfaces nextItem, pendingModelChange, topBounces, and lastRun
   expect(packet.topBounces[0]!.count).toBe(1)
   expect(packet.lastRun?.id).toBe('R1')
   expect(packet.runCount).toBe(1)
+})
+
+test('AC4: recall preserves a multi-word bounce reason in topBounces', async () => {
+  const { root } = gitRepo()
+  cmdInit(root)
+  cmdPersist(
+    root,
+    report({
+      run: { id: 'R1', gate: 'residual' },
+      slices: [{ id: 'S', class: 'logic', owner: 'o', verdict: 'bounce', bounces: [{ ac: 'AC1', reason: 'off by one in the loop' }] }],
+    }),
+  )
+  const packet = await cmdRecall(root)
+  expect(packet.topBounces[0]!.reason).toBe('off by one in the loop')
+  expect(packet.topBounces[0]!.class).toBe('logic')
+})
+
+test('AC4: staleness matches on a path boundary, not a string prefix', async () => {
+  const { root, c0 } = gitRepo()
+  cmdInit(root)
+  patchState(root, (s) => {
+    s.grounding = { commit: c0, watch: ['src/a'] }
+  })
+  commit(root, 'src/ab.ts', 'export const x = 1\n', 'sibling file, not under src/a')
+  const sibling = await cmdRecall(root)
+  expect(sibling.grounding.stale).toBe(false) // src/ab.ts must not match the watch entry src/a
+  commit(root, 'src/a/x.ts', 'export const y = 1\n', 'inside src/a')
+  const inside = await cmdRecall(root)
+  expect(inside.grounding.stale).toBe(true)
+  expect(inside.grounding.changed).toContain('src/a/x.ts')
 })
 
 test('AC4: recall surfaces a seeded open risk in both openRisks and mustTriage', async () => {

@@ -67,9 +67,17 @@ export function validateConstitution(raw: unknown): Constitution {
   const invariants = c.invariants
   if (!Array.isArray(invariants)) throw new VaderError('constitution.invariants must be an array')
   const ids = new Set<string>()
+  // An id becomes part of generated filenames and import paths (shape-<id>.types.ts), and
+  // a distinct name becomes a generated TS type identifier. Reject anything outside a safe
+  // charset here, so a bad model fails at readModel with a clear message instead of emitting
+  // broken code that only fails later at tsc (or, worse, escapes the generated directory).
+  const ID_SAFE = /^[A-Za-z0-9._-]+$/
+  const IDENT_SAFE = /^[A-Za-z_][A-Za-z0-9_]*$/
   for (const inv of invariants) {
     const i = inv as Record<string, unknown>
     if (typeof i.id !== 'string' || i.id === '') throw new VaderError('invariant id required')
+    if (!ID_SAFE.test(i.id))
+      throw new VaderError(`invariant ${i.id}: id must match ${ID_SAFE.source}`)
     if (ids.has(i.id)) throw new VaderError(`duplicate invariant id ${i.id}`)
     ids.add(i.id)
     const isEscape =
@@ -78,6 +86,16 @@ export function validateConstitution(raw: unknown): Constitution {
       throw new VaderError(
         `invariant ${i.id}: kind must be one of ${KINDS.join(', ')} (or use an escape rawCheck)`,
       )
+    const check = i.check
+    if (typeof check === 'object' && check !== null && 'distinct' in check) {
+      const distinct = (check as { distinct: unknown }).distinct
+      if (!Array.isArray(distinct) || distinct.length !== 2)
+        throw new VaderError(`invariant ${i.id}: shape distinct must be a pair of names`)
+      for (const name of distinct) {
+        if (typeof name !== 'string' || !IDENT_SAFE.test(name))
+          throw new VaderError(`invariant ${i.id}: distinct name ${String(name)} must be a TS identifier`)
+      }
+    }
   }
   return raw as Constitution
 }
@@ -217,7 +235,7 @@ function defaultState(): State {
 export function loadState(root: string): State {
   const p = paths(root)
   if (!existsSync(p.state)) throw new VaderError(`no factory state at ${p.state}; run "vader init" first`)
-  return JSON.parse(readFileSync(p.state, 'utf8')) as State
+  return validateState(JSON.parse(readFileSync(p.state, 'utf8')))
 }
 
 function saveState(root: string, state: State): void {
@@ -230,7 +248,7 @@ function saveState(root: string, state: State): void {
 function readLedger(root: string): LedgerLine[] {
   const raw = readFileSync(paths(root).ledger, 'utf8').trim()
   if (raw === '') return []
-  return raw.split('\n').map((l) => JSON.parse(l) as LedgerLine)
+  return raw.split('\n').map((l, i) => validateLedgerLine(JSON.parse(l), `LEDGER.jsonl:${i + 1}`))
 }
 
 export function hashModel(text: string): string {
@@ -275,10 +293,16 @@ function changedSince(root: string, commit: string): string[] {
   return out === '' ? [] : out.split('\n')
 }
 
+// A changed file counts against a watch entry only on a path boundary: 'src/a' must not
+// match 'src/ab.ts'. An exact file path matches itself; a directory prefix matches its tree.
+function underWatch(file: string, watch: string[]): boolean {
+  return watch.some((w) => file === w || file.startsWith(w.endsWith('/') ? w : `${w}/`))
+}
+
 function staleness(root: string, commit: string | null, watch: string[]): Staleness {
   if (commit === null) return { commit, stale: true, reason: 'no-stamp', changed: [] }
   if (!commitExists(root, commit)) return { commit, stale: true, reason: 'missing-commit', changed: [] }
-  const changed = changedSince(root, commit).filter((f) => watch.some((w) => f.startsWith(w)))
+  const changed = changedSince(root, commit).filter((f) => underWatch(f, watch))
   return changed.length > 0
     ? { commit, stale: true, reason: 'watch-touched', changed }
     : { commit, stale: false, reason: null, changed: [] }
@@ -563,7 +587,9 @@ function runCheck(root: string, cmd: string[]): { pass: boolean; detail: string 
   const head = cmd[0]
   if (head === undefined) return { pass: false, detail: 'empty command' }
   try {
-    const out = execFileSync(head, cmd.slice(1), { cwd: root, encoding: 'utf8' })
+    // 64 MiB: a passing tsc/bun-test in a large repo can print well past the 1 MiB default,
+    // and an overflow would otherwise surface as a false gate failure.
+    const out = execFileSync(head, cmd.slice(1), { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
     return { pass: true, detail: out.slice(0, 400) }
   } catch (e) {
     const err = e as { stdout?: string; stderr?: string; message?: string }
@@ -576,7 +602,7 @@ export async function cmdGate(root: string): Promise<GateResult> {
   const state = loadState(root)
   const { model, raw } = await readModel(root)
   const modelHashLocked = state.modelHash === null || state.modelHash === hashModel(raw)
-  const gateCfg = JSON.parse(readFileSync(p.gate, 'utf8')) as GateConfig
+  const gateCfg = validateGateConfig(JSON.parse(readFileSync(p.gate, 'utf8')), 'gate.json')
   const repo = runCheck(root, gateCfg.repoCheck)
   const fallow = gateCfg.fallowCheck ? runCheck(root, gateCfg.fallowCheck) : null
   const invariants: { id: string; pass: boolean; detail: string }[] = []
@@ -614,7 +640,7 @@ export async function cmdGate(root: string): Promise<GateResult> {
 // ---------- run report validation (hand-rolled, named paths in every error) ----------
 
 function fail(path: string, msg: string): never {
-  throw new VaderError(`invalid report: ${path} ${msg}`)
+  throw new VaderError(`invalid ${path}: ${msg}`)
 }
 
 function obj(value: unknown, path: string): Record<string, unknown> {
@@ -744,6 +770,160 @@ export function validateReport(input: unknown): RunReport {
   return report
 }
 
+// ---------- machine-state validation (the .vader files vader itself writes, but which a
+// human can hand-edit; we never trust a parse with an unchecked cast) ----------
+
+function strOpt(value: unknown, path: string): string {
+  if (typeof value !== 'string') fail(path, 'must be a string')
+  return value
+}
+
+function num(value: unknown, path: string): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) fail(path, 'must be a finite number')
+  return value
+}
+
+function nullableStr(value: unknown, path: string): string | null {
+  if (value === null) return null
+  if (typeof value !== 'string') fail(path, 'must be a string or null')
+  return value
+}
+
+function sliceOf(value: unknown, path: string): PartitionSlice {
+  const s = obj(value, path)
+  return {
+    id: str(s.id, `${path}.id`),
+    class: str(s.class, `${path}.class`),
+    paths: arr(s.paths, `${path}.paths`).map((p, j) => str(p, `${path}.paths[${j}]`)),
+  }
+}
+
+function riskOf(value: unknown, path: string): Risk {
+  const r = obj(value, path)
+  return {
+    id: str(r.id, `${path}.id`),
+    desc: str(r.desc, `${path}.desc`),
+    owner: str(r.owner, `${path}.owner`),
+    severity: oneOf(r.severity, `${path}.severity`, ['low', 'medium', 'high'] as const),
+    originRun: strOpt(r.originRun, `${path}.originRun`),
+    status: oneOf(r.status, `${path}.status`, ['open', 'closed'] as const),
+    history: arr(r.history, `${path}.history`).map((h, j) => {
+      const hi = obj(h, `${path}.history[${j}]`)
+      return {
+        run: str(hi.run, `${path}.history[${j}].run`),
+        action: oneOf(hi.action, `${path}.history[${j}].action`, ['finding', 'defer', 'close'] as const),
+        reason: strOpt(hi.reason, `${path}.history[${j}].reason`),
+      }
+    }),
+  }
+}
+
+function validateState(input: unknown): State {
+  const s = obj(input, 'state')
+  if (s.version !== 1) fail('state.version', 'must be 1')
+  const grounding = obj(s.grounding, 'state.grounding')
+  const partition = obj(s.partition, 'state.partition')
+  const ratchet = obj(s.ratchet, 'state.ratchet')
+  const grants = obj(ratchet.grants, 'state.ratchet.grants')
+  const outGrants: Record<string, Grant> = {}
+  for (const [k, v] of Object.entries(grants)) {
+    const g = obj(v, `state.ratchet.grants.${k}`)
+    const grant: Grant = {
+      level: num(g.level, `state.ratchet.grants.${k}.level`),
+      approvedBy: strOpt(g.approvedBy, `state.ratchet.grants.${k}.approvedBy`),
+      date: strOpt(g.date, `state.ratchet.grants.${k}.date`),
+    }
+    if (g.note !== undefined) grant.note = strOpt(g.note, `state.ratchet.grants.${k}.note`)
+    outGrants[k] = grant
+  }
+  return {
+    version: 1,
+    modelHash: nullableStr(s.modelHash, 'state.modelHash'),
+    roadmap: arr(s.roadmap, 'state.roadmap').map((x, i) => {
+      const r = obj(x, `state.roadmap[${i}]`)
+      return {
+        id: str(r.id, `state.roadmap[${i}].id`),
+        title: str(r.title, `state.roadmap[${i}].title`),
+        slicePaths: arr(r.slicePaths, `state.roadmap[${i}].slicePaths`).map((p, j) =>
+          str(p, `state.roadmap[${i}].slicePaths[${j}]`),
+        ),
+        status: oneOf(r.status, `state.roadmap[${i}].status`, ['pending', 'in-progress', 'done', 'blocked'] as const),
+      }
+    }),
+    pendingModelChange:
+      s.pendingModelChange === null ? null : modelChangeOf(s.pendingModelChange, 'state.pendingModelChange'),
+    grounding: {
+      commit: nullableStr(grounding.commit, 'state.grounding.commit'),
+      watch: arr(grounding.watch, 'state.grounding.watch').map((w, i) => str(w, `state.grounding.watch[${i}]`)),
+    },
+    partition: {
+      commit: nullableStr(partition.commit, 'state.partition.commit'),
+      slices: arr(partition.slices, 'state.partition.slices').map((x, i) =>
+        sliceOf(x, `state.partition.slices[${i}]`),
+      ),
+    },
+    risks: arr(s.risks, 'state.risks').map((x, i) => riskOf(x, `state.risks[${i}]`)),
+    pendingTriage: arr(s.pendingTriage, 'state.pendingTriage').map((x, i) => {
+      const t = obj(x, `state.pendingTriage[${i}]`)
+      return {
+        riskId: str(t.riskId, `state.pendingTriage[${i}].riskId`),
+        action: oneOf(t.action, `state.pendingTriage[${i}].action`, ['finding', 'defer', 'close'] as const),
+        reason: strOpt(t.reason, `state.pendingTriage[${i}].reason`),
+      }
+    }),
+    decisions: arr(s.decisions, 'state.decisions').map((d, i) => str(d, `state.decisions[${i}]`)),
+    ratchet: {
+      grants: outGrants,
+      neverRatchet: arr(ratchet.neverRatchet, 'state.ratchet.neverRatchet').map((c, i) =>
+        str(c, `state.ratchet.neverRatchet[${i}]`),
+      ),
+    },
+  }
+}
+
+function validateLedgerLine(input: unknown, path: string): LedgerLine {
+  const l = obj(input, path)
+  const type = oneOf(l.type, `${path}.type`, ['run', 'bounce'] as const)
+  if (type === 'bounce') {
+    return {
+      type: 'bounce',
+      run: str(l.run, `${path}.run`),
+      slice: str(l.slice, `${path}.slice`),
+      class: str(l.class, `${path}.class`),
+      ac: str(l.ac, `${path}.ac`),
+      reason: strOpt(l.reason, `${path}.reason`),
+    }
+  }
+  return {
+    type: 'run',
+    id: str(l.id, `${path}.id`),
+    date: str(l.date, `${path}.date`),
+    mode: oneOf(l.mode, `${path}.mode`, ['build', 'review'] as const),
+    spec: strOpt(l.spec, `${path}.spec`),
+    commitRange: strOpt(l.commitRange, `${path}.commitRange`),
+    gate: oneOf(l.gate, `${path}.gate`, ['green', 'residual', 'failed'] as const),
+    slices: arr(l.slices, `${path}.slices`).map((s, i) => {
+      const slice = obj(s, `${path}.slices[${i}]`)
+      return {
+        id: str(slice.id, `${path}.slices[${i}].id`),
+        class: str(slice.class, `${path}.slices[${i}].class`),
+        verdict: oneOf(slice.verdict, `${path}.slices[${i}].verdict`, ['accept', 'bounce'] as const),
+      }
+    }),
+  }
+}
+
+function validateGateConfig(input: unknown, path: string): GateConfig {
+  const g = obj(input, path)
+  const out: GateConfig = {
+    repoCheck: arr(g.repoCheck, `${path}.repoCheck`).map((x, i) => str(x, `${path}.repoCheck[${i}]`)),
+  }
+  if (g.fallowCheck !== undefined)
+    out.fallowCheck = arr(g.fallowCheck, `${path}.fallowCheck`).map((x, i) => str(x, `${path}.fallowCheck[${i}]`))
+  if (g.note !== undefined) out.note = str(g.note, `${path}.note`)
+  return out
+}
+
 // ---------- triage ----------
 
 export function cmdTriage(
@@ -866,7 +1046,9 @@ export function cmdPersist(root: string, reportInput: RunReport | string): Persi
     )
   }
   for (const risk of report.risks.new) {
-    if (state.risks.some((r) => r.id === risk.id)) throw new VaderError(`duplicate risk id: ${risk.id}`)
+    const existing = state.risks.find((r) => r.id === risk.id)
+    // a risk already carried by THIS run is a safe re-persist (crash recovery), not a conflict.
+    if (existing !== undefined && existing.originRun !== runId) throw new VaderError(`duplicate risk id: ${risk.id}`)
   }
   const knownDecisions = new Set(state.decisions)
   for (const d of report.decisions) {
@@ -881,6 +1063,7 @@ export function cmdPersist(root: string, reportInput: RunReport | string): Persi
   for (const [riskId, d] of dispositions) {
     const risk = state.risks.find((r) => r.id === riskId)
     if (risk === undefined) continue
+    if (risk.history.some((h) => h.run === runId)) continue // already applied: idempotent re-persist
     risk.history.push({ run: runId, action: d.action, reason: d.reason })
     if (d.action === 'defer') {
       risksDeferred.push(riskId)
@@ -891,9 +1074,10 @@ export function cmdPersist(root: string, reportInput: RunReport | string): Persi
   }
   state.pendingTriage = []
   for (const risk of report.risks.new) {
-    state.risks.push({ ...risk, originRun: runId, status: 'open', history: [] })
+    if (!state.risks.some((r) => r.id === risk.id))
+      state.risks.push({ ...risk, originRun: runId, status: 'open', history: [] })
   }
-  for (const d of report.decisions) state.decisions.push(d.id)
+  for (const d of report.decisions) if (!state.decisions.includes(d.id)) state.decisions.push(d.id)
 
   // anti-decay: a run may PROPOSE a model change, never apply it. Parking blocks the item.
   const modelChangeParked = report.modelChange !== undefined
@@ -928,9 +1112,27 @@ export function cmdPersist(root: string, reportInput: RunReport | string): Persi
     stampsAdvanced.push('partition')
   }
 
-  // -- write: ledger append, prose appends, then state last (atomic rename) --
+  // -- write order matters for crash safety. The LEDGER run-line is the commit marker the
+  // dedup guard keys on, so it is written LAST; state (atomic rename) and the prose appends
+  // come first and are all idempotent (guarded above / by marker below). A crash before the
+  // ledger append leaves a re-runnable run, never a bricked one. --
   const p = paths(root)
   const date = new Date().toISOString()
+
+  saveState(root, state)
+
+  const existingDecisions = existsSync(p.decisions) ? readFileSync(p.decisions, 'utf8') : ''
+  for (const d of report.decisions) {
+    if (existingDecisions.includes(`\n## ${d.id}: `)) continue // idempotent re-persist
+    const supersedes = d.supersedes !== undefined ? `\nSupersedes: ${d.supersedes}` : ''
+    appendFileSync(p.decisions, `\n## ${d.id}: ${d.title}\n\nStatus: active (run: ${runId}, ${date})${supersedes}\n\n${d.body}\n`)
+  }
+  const existingConventions = existsSync(p.conventions) ? readFileSync(p.conventions, 'utf8') : ''
+  for (const c of report.conventions) {
+    if (existingConventions.includes(`\n- ${c.id} (run: ${runId}): `)) continue // idempotent re-persist
+    appendFileSync(p.conventions, `\n- ${c.id} (run: ${runId}): ${c.rule}\n`)
+  }
+
   const lines: LedgerLine[] = [
     {
       type: 'run',
@@ -951,16 +1153,6 @@ export function cmdPersist(root: string, reportInput: RunReport | string): Persi
     }
   }
   appendFileSync(p.ledger, lines.map((l) => JSON.stringify(l)).join('\n') + '\n')
-
-  for (const d of report.decisions) {
-    const supersedes = d.supersedes !== undefined ? `\nSupersedes: ${d.supersedes}` : ''
-    appendFileSync(p.decisions, `\n## ${d.id}: ${d.title}\n\nStatus: active (run: ${runId}, ${date})${supersedes}\n\n${d.body}\n`)
-  }
-  for (const c of report.conventions) {
-    appendFileSync(p.conventions, `\n- ${c.id} (run: ${runId}): ${c.rule}\n`)
-  }
-
-  saveState(root, state)
   return {
     run: runId,
     item: item !== undefined ? { id: item.id, status: item.status } : null,
@@ -1015,29 +1207,27 @@ export async function cmdRecall(root: string): Promise<RecallPacket> {
   if (state.partition.commit !== null && partitionBase.reason !== 'missing-commit') {
     const changed = changedSince(root, state.partition.commit)
     for (const slice of state.partition.slices) {
-      const hits = changed.filter((f) => slice.paths.some((w) => f.startsWith(w)))
+      const hits = changed.filter((f) => underWatch(f, slice.paths))
       if (hits.length > 0) staleSlices.push({ id: slice.id, changed: hits })
     }
   }
   const partitionStale = partitionBase.reason === 'no-stamp' || partitionBase.reason === 'missing-commit' || staleSlices.length > 0
 
-  const bounceCounts = new Map<string, number>()
+  // key carries class+reason so a multi-word reason survives intact (no decode-by-split).
+  const bounceCounts = new Map<string, { class: string; reason: string; count: number }>()
   for (const line of ledger) {
     if (line.type !== 'bounce') continue
-    const key = `${line.class} ${line.reason}`
-    bounceCounts.set(key, (bounceCounts.get(key) ?? 0) + 1)
+    const key = `${line.class} ${line.reason}`
+    const prev = bounceCounts.get(key)
+    if (prev === undefined) bounceCounts.set(key, { class: line.class, reason: line.reason, count: 1 })
+    else prev.count++
   }
-  const topBounces = [...bounceCounts.entries()]
-    .map(([key, count]) => {
-      const [cls = '', reason = ''] = key.split(' ')
-      return { class: cls, reason, count }
-    })
-    .sort((a, b) => b.count - a.count)
-    .slice(0, 10)
+  const topBounces = [...bounceCounts.values()].sort((a, b) => b.count - a.count).slice(0, 10)
 
   const runs = ledger.filter((l): l is RunLine => l.type === 'run')
   const last = runs[runs.length - 1]
   const next = state.roadmap.find((r) => r.status === 'pending') ?? null
+  const openRisks = state.risks.filter((r) => r.status === 'open')
 
   return {
     modelHash: state.modelHash,
@@ -1053,8 +1243,10 @@ export async function cmdRecall(root: string): Promise<RecallPacket> {
       reason: partitionStale ? (staleSlices.length > 0 ? 'watch-touched' : partitionBase.reason) : null,
       staleSlices,
     },
-    openRisks: state.risks.filter((r) => r.status === 'open'),
-    mustTriage: state.risks.filter((r) => r.status === 'open'),
+    // mustTriage is intentionally identical to openRisks today (every open risk blocks the
+    // next persist). It is named separately so the gating list can narrow later without churn.
+    openRisks,
+    mustTriage: openRisks,
     pendingTriage: state.pendingTriage,
     decisions: { file: '.vader/DECISIONS.md', count: state.decisions.length },
     conventions: { file: '.vader/CONVENTIONS.md' },
@@ -1080,12 +1272,26 @@ commands:
   ratchet [<class>] [--grant <level> --approved-by <name>]
                                           advisory autonomy verdicts; grant only with named human approval`
 
-function flag(args: string[], name: string): string | undefined {
+export function flag(args: string[], name: string): string | undefined {
   const i = args.indexOf(name)
   if (i === -1) return undefined
   const value = args[i + 1]
+  // A flag with no value (end of args, or immediately followed by another --flag) must not
+  // silently swallow the next flag as its value. Consume only the flag itself in that case.
+  if (value === undefined || value.startsWith('--')) {
+    args.splice(i, 1)
+    return undefined
+  }
   args.splice(i, 2)
   return value
+}
+
+// A grant level is an autonomy authorization, so a malformed --grant must fail loudly rather
+// than coerce: Number('') is 0 and Number('x') is NaN, either of which would silently corrupt
+// the ratchet. Accept only a non-negative integer.
+export function parseGrant(raw: string): number {
+  if (!/^\d+$/.test(raw)) throw new VaderError(`--grant must be a non-negative integer, got: ${raw}`)
+  return Number(raw)
 }
 
 async function main(argv: string[]): Promise<number> {
@@ -1131,7 +1337,7 @@ async function main(argv: string[]): Promise<number> {
       }
       case 'ratchet': {
         const [cls] = rest
-        const opts = grant !== undefined ? { grant: Number(grant), approvedBy: approvedBy ?? '' } : undefined
+        const opts = grant !== undefined ? { grant: parseGrant(grant), approvedBy: approvedBy ?? '' } : undefined
         print(cmdRatchet(root, cls, opts))
         return 0
       }
