@@ -20,8 +20,10 @@ import {
   globToRegExp,
   flag,
   parseGrant,
+  planTick,
   type RunReport,
   type State,
+  type RecallPacket,
 } from './vader.ts'
 
 function tmpRepo(): string {
@@ -631,6 +633,67 @@ test('AC4: recall surfaces a seeded open risk in both openRisks and mustTriage',
   const packet = await cmdRecall(root)
   expect(packet.openRisks.map((r) => r.id)).toEqual(['RK1'])
   expect(packet.mustTriage.map((r) => r.id)).toEqual(['RK1'])
+})
+
+// ---------- planTick (the shared fan-out plan) ----------
+
+function recallStub(over: Partial<RecallPacket>): RecallPacket {
+  return {
+    modelHash: null,
+    modelOk: true,
+    invariantCount: 0,
+    roadmap: [],
+    nextItem: null,
+    pendingModelChange: null,
+    grounding: { commit: null, stale: false, reason: null, changed: [] },
+    partition: { commit: null, stale: false, reason: null, slices: over.partition?.slices ?? [], staleSlices: [] },
+    openRisks: [],
+    mustTriage: [],
+    pendingTriage: [],
+    decisions: { file: '.vader/DECISIONS.md', count: 0 },
+    conventions: { file: '.vader/CONVENTIONS.md' },
+    topBounces: over.topBounces ?? [],
+    ratchet: over.ratchet ?? [],
+    lastRun: null,
+    runCount: 0,
+  }
+}
+
+test('planTick routes a seam slice to seamFirst with the full voter panel', () => {
+  const plan = planTick(
+    recallStub({
+      partition: { commit: null, stale: false, reason: null, slices: [{ id: 'S0', class: 'seam', paths: ['src/seam'] }], staleSlices: [] },
+      ratchet: [{ class: 'seam', level: 0, eligible: 0, consecutiveClean: 0, neverRatchet: true }],
+    }),
+  )
+  expect(plan.seamFirst).toEqual([{ id: 'S0', class: 'seam', voters: 3, reason: 'seam' }])
+  expect(plan.siblings).toEqual([])
+})
+
+test('planTick scales voters for never-ratchet and previously-bounced classes, else one', () => {
+  const plan = planTick(
+    recallStub({
+      partition: {
+        commit: null,
+        stale: false,
+        reason: null,
+        slices: [
+          { id: 'S1', class: 'security', paths: ['a'] },
+          { id: 'S2', class: 'logic', paths: ['b'] },
+          { id: 'S3', class: 'plumbing', paths: ['c'] },
+        ],
+        staleSlices: [],
+      },
+      ratchet: [{ class: 'security', level: 0, eligible: 0, consecutiveClean: 0, neverRatchet: true }],
+      topBounces: [{ class: 'logic', reason: 'off by one', count: 2 }],
+    }),
+  )
+  expect(plan.seamFirst).toEqual([])
+  expect(plan.siblings).toEqual([
+    { id: 'S1', class: 'security', voters: 3, reason: 'never-ratchet' },
+    { id: 'S2', class: 'logic', voters: 3, reason: 'top-bounce' },
+    { id: 'S3', class: 'plumbing', voters: 1, reason: 'default' },
+  ])
 })
 
 // ---------- AC1-AC7: CLI binary smoke ----------

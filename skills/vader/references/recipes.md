@@ -43,14 +43,17 @@ its own slice; assignment is always cross-owner.
 
 ## Voter count (scaled by evidence, not by vibes)
 
-Read `topBounces` and `ratchet` from `vader recall`. For each slice:
+Do not hand-roll this. `planTick(recall)` (exported from the engine) is the one place the
+fan-out is decided, so every harness agrees. It returns `seamFirst` and `siblings`, and each
+slice carries a `voters` count and the `reason` it was scaled:
 
-- 3 voters when the slice is high risk: its class is in `neverRatchet` (seam, security,
-  migration), or its class appears in `topBounces`, or it touches a frozen integration seam.
+- 3 voters when the slice class is a seam, is in `neverRatchet` (seam, security, migration), or
+  appears in `topBounces` (empirically fragile here).
 - 1 voter otherwise.
 
 A slice is accepted only by consensus (majority ACCEPT). One REJECT among three on a high-risk
-slice bounces it.
+slice bounces it. The parallel script below and the sequential fallback both consume the SAME
+`planTick` output, so they cannot disagree on what runs or how hard it is verified.
 
 ## The bounded deletion pass (a verifier lever)
 
@@ -81,11 +84,12 @@ export const meta = {
   ],
 }
 
-const { slices, baseSha, recall, mantra, gatePrompt } = args
-const topClasses = new Set(recall.topBounces.map((b) => b.class))
-const neverRatchet = new Set(recall.ratchet.filter((r) => r.neverRatchet).map((r) => r.class))
-const highRisk = (s) => neverRatchet.has(s.class) || topClasses.has(s.class) || s.seam === true
-const voters = (s) => (highRisk(s) ? 3 : 1)
+// `plan` is `planTick(recall)`, computed once by the driver. It is the single source of truth
+// for ordering and voter count; the script never re-derives risk. `votersById` lets the verify
+// phase look up each slice's panel size by id.
+const { slices, baseSha, plan, mantra, gatePrompt } = args
+const votersById = new Map([...plan.seamFirst, ...plan.siblings].map((t) => [t.id, t.voters]))
+const voters = (s) => votersById.get(s.id) ?? 1
 
 // Critic red-teams the plan before any code is written.
 phase('Critic')
@@ -96,20 +100,17 @@ const critique = await agent(
 )
 if (critique.blocking.length > 0) return { blocked: 'critic', findings: critique.blocking }
 
-// The seam slice (if any) builds alone first, so siblings fork from a settled interface.
+// Seam slices (plan.seamFirst) build alone first, so siblings fork from a settled interface.
 phase('Seam')
-const seam = slices.find((s) => s.seam === true)
-if (seam !== undefined) {
-  await agent(ownerPrompt(seam, baseSha, mantra), {
-    label: `owner:${seam.id}`,
-    phase: 'Seam',
-    isolation: 'worktree',
-  })
+const byId = new Map(slices.map((s) => [s.id, s]))
+for (const t of plan.seamFirst) {
+  const s = byId.get(t.id)
+  await agent(ownerPrompt(s, baseSha, mantra), { label: `owner:${s.id}`, phase: 'Seam', isolation: 'worktree' })
 }
 
 // Sibling owners build in parallel, each isolated off the base sha.
 phase('Owners')
-const siblings = slices.filter((s) => s.seam !== true)
+const siblings = plan.siblings.map((t) => byId.get(t.id))
 await parallel(
   siblings.map((s) => () =>
     agent(ownerPrompt(s, baseSha, mantra), { label: `owner:${s.id}`, phase: 'Owners', isolation: 'worktree' }),
@@ -166,9 +167,49 @@ After the script returns, the driver builds one `RunReport` and calls `vader per
 - `modelChange`: present only when a verifier NOTE proved the constitution must change. Persist
   parks it and blocks the item; a human opens that gate.
 
-## Solo fallback
+## Sequential fallback (Codex, Hermes, any host without fan-out)
 
-A host without a fan-out primitive runs the same phases sequentially: critic, seam owner,
-sibling owners one at a time, then one verifier per slice (voters collapse to 1, except a
-high-risk slice still gets a second independent pass). The report and the gate are identical.
-See `references/adapters.md`.
+A host with no parallel primitive runs the EXACT same `planTick` output, one agent at a time.
+Nothing about the plan changes: seam slices still run first, every slice still earns its full
+`voters` panel, the verifiers are still independent and refute-first. Only the wall-clock
+differs, and the assembled `RunReport` plus the `vader gate` verdict are byte-identical to the
+parallel path.
+
+The executor, in pseudocode a single-threaded host can follow verbatim:
+
+```js
+// plan = planTick(recall). Same input as the Workflow script; no parallelism.
+const plan = planTick(recall)
+const byId = new Map(slices.map((s) => [s.id, s]))
+const order = [...plan.seamFirst, ...plan.siblings] // seams first, then the rest, all in series
+
+// 1. Critic, once, before any code.
+const critique = await runAgent(criticPrompt(slices))
+if (critique.blocking.length > 0) return { blocked: 'critic', findings: critique.blocking }
+
+// 2. Owners, one at a time. A single tree is safe because only one writer ever runs.
+for (const t of order) await runAgent(ownerPrompt(byId.get(t.id), baseSha, mantra))
+
+// 3. Verifiers, t.voters independent passes per slice, each a fresh context that did not write
+//    the slice. The panel size is identical to the parallel path; the passes just run serially.
+const sliceResults = []
+for (const t of order) {
+  const verdicts = []
+  for (let i = 0; i < t.voters; i++) {
+    verdicts.push(await runAgent(`${gatePrompt}\n\nSlice ${t.id}. You did not write it. Voter ${i + 1}.`))
+  }
+  const accepts = verdicts.filter((v) => v.verdict === 'ACCEPT').length
+  sliceResults.push({
+    id: t.id,
+    class: t.class,
+    verdict: accepts > verdicts.length / 2 ? 'accept' : 'bounce',
+    bounces: verdicts.filter((v) => v.verdict === 'REJECT').flatMap((v) => v.bounces ?? []),
+  })
+}
+return { sliceResults }
+```
+
+Then assemble the `RunReport` and call `vader persist` exactly as the parallel path does. A host
+that wants a small speedup without true parallelism may interleave the verifier passes of an
+already-built slice with the next owner; the gate verdict is unchanged either way. See
+`references/adapters.md`.

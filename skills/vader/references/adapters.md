@@ -25,15 +25,28 @@ carry data to and from the CLI.
 
 | Harness | Primitive | Isolation | Status |
 |---|---|---|---|
-| Claude Code | the `Workflow` tool (agent / parallel / pipeline) | `isolation: 'worktree'` per owner | working (Phase 1) |
-| Pi | extension plus pi-subagents | worktree per subagent | documented, Phase E |
-| Codex | native subagents, else sequential | worktree or serialize | documented, Phase E |
-| Hermes | native subagents, else sequential | worktree or serialize | documented, Phase E |
+| Claude Code | the `Workflow` tool (agent / parallel / pipeline) | `isolation: 'worktree'` per owner | working |
+| Pi | `extensions/vader` plus pi-subagents | worktree per subagent | implemented (extension, unit-tested) |
+| Codex | native subagents, else sequential | worktree or serialize | shared `planTick` plus sequential fallback |
+| Hermes | native subagents, else sequential | worktree or serialize | shared `planTick` plus sequential fallback |
 
-Where a harness has no fan-out primitive, the adapter falls back to sequential: same phases,
-owners one at a time, voters collapsed to one (a high-risk slice still earns a second
-independent pass). The report and the gate are byte-for-byte the same as the parallel path, so
-a tick is reproducible across harnesses. The only difference a fallback makes is wall-clock.
+Every adapter consumes the same plan. `planTick(recall)` (exported from the engine) is the
+single source of truth for the fan-out: it returns `seamFirst` (run sequentially, before any
+sibling) and `siblings` (run in parallel), and stamps each slice with a `voters` count that is
+3 for a seam, never-ratchet, or previously-bounced class and 1 otherwise. Because the plan is
+computed once in the spine, the Claude Workflow path, the Pi extension, and the sequential
+fallback cannot drift in WHAT they run; they differ only in HOW they execute it.
+
+Where a harness has no fan-out primitive, the adapter falls back to sequential: same
+`planTick` output, owners one at a time, parallel siblings simply run in series (a high-risk
+slice still earns its full `voters` panel as sequential passes). The report and the gate are
+byte-for-byte the same as the parallel path, so a tick is reproducible across harnesses. The
+only difference a fallback makes is wall-clock.
+
+Honesty note on maturity: the Pi extension and `planTick` are unit-tested in this repo
+(`extensions/vader/extension.test.ts`, `skills/vader/scripts/vader.test.ts`). End-to-end runs
+on Pi, Codex, and Hermes are validated by the operator on those runtimes, since they cannot be
+driven from the Claude Code host where these tests run.
 
 ## The Claude Code adapter (Phase 1, working)
 
