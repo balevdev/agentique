@@ -1,67 +1,102 @@
 # agentique
 
-A small house of well-mannered agent skills. Agents that say *bonjour* before they `sudo`, ask *pardon* before they push, and never finish a sentence with an em dash. *Agent* plus *étiquette*: skills with savoir-vivre.
+An opinionated software factory for agents, free and in the open. One skill, `vader`: it turns
+one idea, or one existing repo, into invariant-checked shipped code, built or hardened one slice
+batch per tick, in any repo root, without letting the architecture decay across hundreds of
+agent ticks.
+
+The name is *agent* plus *etiquette*: an agent that says *bonjour* before it `sudo`s, asks
+*pardon* before it pushes, and never finishes a sentence with an em dash.
 
 Distributed through the open [skills.sh](https://skills.sh) ecosystem.
 
 ## Install
 
 ```bash
-# install the whole catalogue
 npx skills add balevdev/agentique
-
-# or pick a single skill
-npx skills add balevdev/agentique --skill jarvis-anakin-mission
 ```
 
-Pass `-g` for a global install, or `-a claude-code` (etc.) to target one agent. See `npx skills add --help` for the full set.
+Pass `-g` for a global install, or `-a claude-code` (etc.) to target one agent. See
+`npx skills add --help` for the full set.
 
-## Skills in this repo
+## What vader is
 
-### [`jarvis-anakin-mission`](skills/jarvis-anakin-mission/SKILL.md)
+An agent loop is a box with no memory of what it meant. Vader puts the meaning *outside* the
+box. A human authors a `constitution.model` that names the semantic distinctions which must
+never collapse (a temporal point is not a temporal interval; `common` must not import `etl`) as
+four invariant kinds: `shape`, `dependency`, `data`, and `behavioral`, plus a `rawCheck`
+escape. A router (`vader gen`) compiles each one into the strongest deterministic check the
+target toolchain allows: TypeScript gets real compile errors from branded types and
+`@ts-expect-error`, every other language gets a generated property test or AST scan floor. When
+an agent collapses a distinction, `vader gate` fails on a named invariant id, which is an
+automatic verifier bounce. No judgment, no drift.
 
-A drop-in, harness-agnostic protocol for pointing a disciplined team of agents at one repo. One agent conducts; owners each take a disjoint slice; independent verifiers accept the work they did not write. The output is a roadmap or capability map, a clean diff, and a result you can defend from that diff. It runs in one of two modes, chosen by intent, over a single shared spine.
+It is built for people who prefer encapsulated, simple code: deep modules behind thin
+interfaces, encapsulation over abstraction, one pattern per concern, no premature DRY, low
+cognitive load. Those values are not a style guide here; they are enforced by the gate and
+carried in every owner and verifier prompt.
 
-**`mode: build`** diverges then converges for new work. It decomposes the goal, optionally runs a design tournament that independent critics red team so the plan is stress tested before any code exists, then owners ship their slices against a frozen contract while verifiers surface what is missing. It writes only under `.mission-control/`, and recommends a review when the build is done to harden the result. Use it to plan and build a large feature or roadmap, break a big ambiguous idea into a sequenced plan, weigh competing architectures before committing, or coordinate several agents to ship something new.
+### The loop
 
-**`mode: review`** converges on an existing repo. Owners partition it off its real module boundaries, inventory what each slice does, and fix what is wrong; verifiers audit the fixes they did not write. It writes only under `.team-review/`, so a review and a build on the same repo never collide. Use it to audit, review, harden, or fix a codebase, inventory its capabilities, or point several agents at one repo without them colliding.
+Vader runs on two human gates and nothing else: freeze the model at conceive, and approve any
+later model change. Between them the build is autonomous (gate the model, free the code). An
+anti-decay lock makes the model a protected artifact: owners can make code fail the gate but
+cannot edit `constitution.model.*` or `generated/` to silence it, and the gate fails closed if
+the locked model hash no longer matches. A run may *propose* a model change; it never applies
+one.
 
-Both modes run the same five phases, the same three execution modes (Parallel Teams for many parallel subagents, Sequential Slices for serial ones, Solo for hosts with no subagent primitive at all), the same one structured handoff per agent, and the same ready or blocked verdict backed by named checks. The agent count is sized from the repo's real module boundaries, not a fixed shape.
+Two modes share one engine:
 
-### [`skywalker-workflows`](skills/skywalker-workflows/SKILL.md)
+- **build**: idea to shipped code. Conceive (human gate), decompose into disjoint slices, then
+  per tick implement one roadmap item and verify it.
+- **review**: audit and harden an existing repo. Ground a fresh baseline, partition the repo
+  into disjoint slices, then per tick implement and verify a slice batch.
 
-The same Anakin sprint, native to hosts that can coordinate many agents. In Pi, it uses the companion Skywalker extension plus `pi-subagents`: the extension collects the mission, then the parent agent grounds the repo, slices it into disjoint owners, approves contracts, launches owner/verifier chains, and gates the result. In Claude Code, it can still use dynamic workflows when the Workflow tool is present.
+Both share the same spine: disjoint slices, frozen contracts, refute-first verifiers who never
+bless their own work, the compiled-constitution gate, and a triage-gated persist that refuses
+to end a tick while any open risk is untriaged. Between ticks a small deterministic CLI
+(`scripts/vader.ts`, bun, zero runtime deps) closes the loop: `recall` rehydrates a session
+from hash-stamped factory state in one call, the ledger turns verifier bounces into calibration
+data that pre-empts owners and scales verification next tick, and an evidence-derived ratchet
+computes how much human gating each slice class still needs, with automatic demotion on any
+defect. Factory state lives in a committed `.vader/` directory, so any future session, machine,
+or human inherits the partition, decisions, conventions, open risks, and defect history.
 
-The win is leanness. The session plans (grounds the repo, slices it into disjoint owners, freezes each contract), launches one runtime fanout that runs owners and cross assigned verifiers, then gates the result against baseline. Pi uses async subagent chains and file artifacts; Claude Code uses workflow script variables and runtime status. Reach for it when the slice count is more than a couple, when you want Claude Code workflow-style orchestration in Pi, or when independent verifiers need to accept work they did not write.
+### One spine, a thin edge per harness
 
-### [`anakin-galaxy`](skills/anakin-galaxy/SKILL.md)
+The deep module is the spine: the `vader` CLI plus the protocol and the acceptance gate. None
+of it knows which agent host drives it. An adapter is the thin interface that lets a given host
+run a tick, and `planTick(recall)` is the single source of truth for the fan-out, so the plan
+cannot drift between harnesses.
 
-The Anakin sprint grown into a software factory: repeated runs over one repo where every run's output is the next run's mandatory input. Within a run it is the familiar shape (ground, slice, frozen contracts, parallel owners, adversarial verifiers, two-sided gate). Between runs a small deterministic CLI (`scripts/galaxy.ts`, bun, zero runtime deps) closes the loop: `recall` rehydrates a session from hash-stamped factory state in one call, `persist` refuses to end a run while any residual risk is untriaged, the ledger turns verifier bounces into calibration data that pre-empts owners and scales verification in the next run, and an advisory ratchet computes how much human gating each slice class still needs, on evidence, with automatic demotion on any defect.
+| Harness | Fan-out primitive | Status |
+|---|---|---|
+| Claude Code | the `Workflow` tool (agent / parallel / pipeline) | working |
+| Pi | `extensions/vader` plus pi-subagents | implemented (extension, unit-tested) |
+| Codex / Hermes | native subagents, else sequential | shared `planTick` plus sequential fallback |
 
-Reach for it when sprints over a repo should compound instead of starting from amnesia: factory state lives in a committed `.galaxy/` directory, so any future session, machine, or human inherits the partition, decisions, conventions, open risks, and defect history.
+A host with no fan-out primitive runs the exact same `planTick` output one agent at a time; the
+assembled run report and the gate verdict are byte-identical to the parallel path. See
+`skills/vader/references/adapters.md`.
 
-### [`vader`](skills/vader/SKILL.md)
+## The Pi extension
 
-An app-agnostic software factory for `/loop`: one idea becomes a deep spec, a protected constitution, and shipped code, built one roadmap item per tick in any repo root, with no architecture decay. The premise is that an agent loop is a box with no memory of what it meant, so the meaning lives outside the box. A human authors a `constitution.model` that names the semantic distinctions that must never collapse (a temporal point is not a temporal interval; common must not import etl) as four invariant kinds: `shape`, `dependency`, `data`, and `behavioral`, plus a `rawCheck` escape. A router (`vader gen`) compiles each one into the strongest deterministic check the target toolchain allows: TypeScript gets real compile errors from branded types and `@ts-expect-error`, every other language gets a generated property test or AST scan floor. When an agent collapses a distinction, `vader gate` fails on a named invariant id, which is an automatic verifier bounce.
-
-The loop runs on two human gates and nothing else: freeze the model at conceive, approve any later model change. Between them the build is autonomous (gate the model, free the code). An anti-decay lock makes the model a protected artifact: owners can make code fail the gate but cannot edit `constitution.model.*` or `generated/` to silence it, and the gate fails closed if the locked model hash no longer matches. The CLI (`scripts/vader.ts`, bun, zero runtime deps) owns a committed `.vader/` directory: `init`, `gen`, `gate`, `recall`, `persist`. Reach for it to build an app from a spec autonomously over many ticks while a compiled constitution holds the architecture in place.
-
-### [`extensions/skywalker`](extensions/skywalker/index.ts)
-
-A Pi companion extension for `skywalker-workflows`. It registers `/skywalker`, `/skywalker-preview`, `/skywalker-status`, and `/skywalker-clear`. The extension does not edit code or spawn subagents directly; it creates a structured kickoff prompt so the parent Pi agent remains the orchestrator.
+`extensions/vader` is a Pi companion that registers `/vader`, `/vader-preview`, `/vader-status`,
+and `/vader-clear`. It does not edit code or spawn subagents directly; it builds a structured
+kickoff prompt so the parent Pi agent stays the orchestrator.
 
 To install manually into Pi:
 
 ```bash
-mkdir -p ~/.pi/agent/extensions/skywalker
-cp extensions/skywalker/index.ts ~/.pi/agent/extensions/skywalker/index.ts
+mkdir -p ~/.pi/agent/extensions/vader
+cp extensions/vader/index.ts ~/.pi/agent/extensions/vader/index.ts
 /reload
 ```
 
 Then run:
 
 ```text
-/skywalker review apps/api --concurrency 4 --worktree single-tree
+/vader review apps/api --concurrency 4 --worktree single-tree
 ```
 
 ## Repo layout
@@ -69,50 +104,28 @@ Then run:
 ```
 agentique/
 ├── extensions/
-│   └── skywalker/
+│   └── vader/
 │       ├── index.ts                 # Pi companion slash commands and TUI wizard
 │       └── extension.test.ts        # behavior tests for prompt/status state
 └── skills/
-    ├── jarvis-anakin-mission/
-    │   ├── SKILL.md
-    │   └── references/
-    │       ├── protocol.md          # the spine: one invariant, mantra, flow rules, five phases
-    │       ├── execution-modes.md   # the three execution modes, VCS isolation, budgets
-    │       ├── handoff-schemas.md   # the one structured handoff artifact and verdict rubric
-    │       ├── build-delta.md       # Phase 1 for mode: build
-    │       └── review-delta.md      # Phase 1 for mode: review
-    ├── skywalker-workflows/
-    │   ├── SKILL.md
-    │   └── references/
-    │       ├── pi-subagent-runtime.md # Pi-native phase map and chain shapes
-    │       ├── protocol.md            # the invariant, mantra, session vs workflow split, phase map
-    │       └── recipes.md             # copyable script: meta, schemas, build skeleton, review delta
-    ├── anakin-galaxy/
-    │   ├── SKILL.md
-    │   ├── references/
-    │   │   ├── protocol.md            # phases -1 to 5, the invariant, session/workflow/CLI split
-    │   │   ├── memory.md              # .galaxy/ layout, run-report and recall schemas, staleness
-    │   │   ├── ratchet.md             # evidence-licensed autonomy, automatic demotion
-    │   │   └── recipes.md             # memory-fed workflow script idioms
-    │   └── scripts/
-    │       ├── galaxy.ts              # the factory CLI: init, recall, triage, persist, ratchet
-    │       └── galaxy.test.ts         # 41 behavior tests against real temp git repos
     └── vader/
-        ├── SKILL.md                   # the loop, two human gates, anti-decay lock, CLI surface
-        ├── references/
-        │   ├── protocol.md            # phases P-1 to P4, the tick, the gates
-        │   └── constitution.md        # the four invariant kinds, worked examples, rawCheck escape
+        ├── SKILL.md                 # the loop, two human gates, anti-decay lock, CLI surface
         ├── commands/
-        │   └── vader.md               # the /vader tick driver for /loop
+        │   └── vader.md             # the /vader tick driver for /loop
+        ├── references/
+        │   ├── protocol.md          # phases P-1 to P4, the tick, the gates
+        │   ├── constitution.md      # the four invariant kinds, worked examples, rawCheck escape
+        │   ├── acceptance-gate.md   # the verifier's five-pass refute-first gate
+        │   ├── adapters.md          # one spine, a thin edge per harness; planTick fan-out
+        │   └── recipes.md           # the Workflow script and the sequential fallback
         └── scripts/
-            ├── vader.ts               # the factory CLI: init, gen, gate, recall, persist
-            ├── vader.test.ts          # behavior tests against real temp repos
-            └── dogfood.test.ts        # end-to-end proof: a collapsed boundary fails the gate by id
+            ├── vader.ts             # the factory CLI: init, gen, gate, recall, triage, persist, ratchet
+            ├── vader.test.ts        # behavior tests against real temp git repos
+            └── dogfood.test.ts      # end-to-end proof: a collapsed boundary fails the gate by id
 ```
 
-The CLI auto-discovers any directory under `skills/` that contains a `SKILL.md` with a `name` and `description` in its YAML frontmatter. Adding a new skill is a matter of dropping a new folder in.
-
-> Previous releases shipped this as two skills, `anakin-mission-control` (build) and `jarvis-snowden-academy` (review). They are now one `jarvis-anakin-mission` skill with a `mode` switch over a single shared spine, since skills.sh installs one skill directory at a time and the two shared ~70% of their text.
+The skills.sh CLI auto-discovers any directory under `skills/` that contains a `SKILL.md` with
+a `name` and `description` in its YAML frontmatter.
 
 ## License
 
