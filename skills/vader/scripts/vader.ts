@@ -1,13 +1,17 @@
 #!/usr/bin/env bun
 // vader: the deterministic spine of an app-agnostic software factory.
-// One module. The CLI owns .vader/ state; the driving agent owns prose + runs/.
-// Commands: init, gen, gate, recall, persist.
+// One module. The CLI owns .vader/ machine state (state.json, LEDGER.jsonl); the driving
+// agent owns the prose files and runs/<id>/. Agents read factory state, never write it.
 //
-// The constitution model is the protected source of truth. vader gen compiles
-// each invariant into a deterministic check in the target repo's toolchain;
-// vader gate runs them and reports pass/fail keyed by invariant id. An id in the
-// fail set is an automatic verifier bounce. The model is human-gated: a tick may
-// PROPOSE a model change, it can never apply one.
+// Two things live here, by design fused into one spine:
+//   1. The constitution: a human-gated, hash-locked model. `vader gen` compiles each
+//      invariant into a deterministic check; `vader gate` runs them and reports pass/fail
+//      by invariant id. A failed id is an automatic verifier bounce. A tick may PROPOSE a
+//      model change, never apply one (the anti-decay lock).
+//   2. The memory: verify-before-trust recall, triage-gated persist, an evidence-derived
+//      ratchet, and a bounce-pattern ledger, so the factory learns instead of decaying.
+//
+// Commands: init, gen, gate, recall, triage, persist, ratchet.
 
 import {
   existsSync,
@@ -55,20 +59,6 @@ export type Constitution = {
   invariants: Invariant[]
 }
 
-// ---------- factory state ----------
-
-export type RoadmapStatus = 'pending' | 'in-progress' | 'done' | 'blocked'
-export type RoadmapItem = { id: string; title: string; slicePaths: string[]; status: RoadmapStatus }
-
-export type State = {
-  version: 1
-  modelHash: string | null
-  roadmap: RoadmapItem[]
-  risks: { id: string; desc: string; status: 'open' | 'closed' }[]
-  pendingModelChange: { proposedBy: string; reason: string; diff: string } | null
-  ratchet: { consecutiveCleanTicks: number }
-}
-
 const KINDS: InvariantKind[] = ['shape', 'dependency', 'behavioral', 'data']
 
 export function validateConstitution(raw: unknown): Constitution {
@@ -92,6 +82,103 @@ export function validateConstitution(raw: unknown): Constitution {
   return raw as Constitution
 }
 
+// ---------- factory state (merged: vader roadmap/model + galaxy memory) ----------
+
+export type RoadmapStatus = 'pending' | 'in-progress' | 'done' | 'blocked'
+export type RoadmapItem = { id: string; title: string; slicePaths: string[]; status: RoadmapStatus }
+
+export type Mode = 'build' | 'review'
+export type Gate = 'green' | 'residual' | 'failed'
+export type Severity = 'low' | 'medium' | 'high'
+export type TriageAction = 'finding' | 'defer' | 'close'
+
+export type PartitionSlice = { id: string; class: string; paths: string[] }
+export type Grant = { level: number; approvedBy: string; date: string; note?: string }
+
+export type Risk = {
+  id: string
+  desc: string
+  owner: string
+  severity: Severity
+  originRun: string
+  status: 'open' | 'closed'
+  history: { run: string; action: TriageAction; reason: string }[]
+}
+
+export type ModelChange = { proposedBy: string; reason: string; diff: string }
+
+export type State = {
+  version: 1
+  modelHash: string | null
+  roadmap: RoadmapItem[]
+  pendingModelChange: ModelChange | null
+  grounding: { commit: string | null; watch: string[] }
+  partition: { commit: string | null; slices: PartitionSlice[] }
+  risks: Risk[]
+  pendingTriage: { riskId: string; action: TriageAction; reason: string }[]
+  decisions: string[]
+  ratchet: { grants: Record<string, Grant>; neverRatchet: string[] }
+}
+
+// ---------- run report (single persist input, build + review) ----------
+
+export type Bounce = { ac: string; reason: string }
+export type SliceResult = {
+  id: string
+  class: string
+  owner: string
+  verdict: 'accept' | 'bounce'
+  bounces: Bounce[]
+}
+
+export type RunReport = {
+  run: { id: string; mode: Mode; spec: string; commitRange: string; gate: Gate }
+  itemId?: string
+  slices: SliceResult[]
+  risks: {
+    new: { id: string; desc: string; owner: string; severity: Severity }[]
+    dispositions: { riskId: string; action: TriageAction; reason: string }[]
+  }
+  decisions: { id: string; title: string; body: string; supersedes?: string }[]
+  conventions: { id: string; rule: string }[]
+  stamps?: {
+    grounding?: { commit: string; watch: string[] }
+    partition?: { commit: string; slices: PartitionSlice[] }
+  }
+  modelChange?: ModelChange
+}
+
+type RunLine = {
+  type: 'run'
+  id: string
+  date: string
+  mode: Mode
+  spec: string
+  commitRange: string
+  gate: Gate
+  slices: { id: string; class: string; verdict: 'accept' | 'bounce' }[]
+}
+type BounceLine = { type: 'bounce'; run: string; slice: string; class: string; ac: string; reason: string }
+type LedgerLine = RunLine | BounceLine
+
+export type Staleness = {
+  commit: string | null
+  stale: boolean
+  reason: 'no-stamp' | 'missing-commit' | 'watch-touched' | null
+  changed: string[]
+}
+
+export type RatchetClass = {
+  class: string
+  level: number
+  eligible: number
+  consecutiveClean: number
+  neverRatchet: boolean
+}
+
+const NEVER_RATCHET_DEFAULT = ['seam', 'security', 'migration']
+const LEVELS = { L1_CLEAN_RUNS: 2, L2_CLEAN_RUNS: 3 }
+
 // ---------- filesystem layout ----------
 
 export function paths(root: string) {
@@ -106,6 +193,9 @@ export function paths(root: string) {
     gate: join(dir, 'gate.json'),
     spec: join(dir, 'spec'),
     runs: join(dir, 'runs'),
+    grounding: join(dir, 'GROUNDING.md'),
+    decisions: join(dir, 'DECISIONS.md'),
+    conventions: join(dir, 'CONVENTIONS.md'),
   }
 }
 
@@ -114,9 +204,13 @@ function defaultState(): State {
     version: 1,
     modelHash: null,
     roadmap: [],
-    risks: [],
     pendingModelChange: null,
-    ratchet: { consecutiveCleanTicks: 0 },
+    grounding: { commit: null, watch: [] },
+    partition: { commit: null, slices: [] },
+    risks: [],
+    pendingTriage: [],
+    decisions: [],
+    ratchet: { grants: {}, neverRatchet: [...NEVER_RATCHET_DEFAULT] },
   }
 }
 
@@ -133,13 +227,18 @@ function saveState(root: string, state: State): void {
   renameSync(tmp, p.state)
 }
 
+function readLedger(root: string): LedgerLine[] {
+  const raw = readFileSync(paths(root).ledger, 'utf8').trim()
+  if (raw === '') return []
+  return raw.split('\n').map((l) => JSON.parse(l) as LedgerLine)
+}
+
 export function hashModel(text: string): string {
   return createHash('sha256').update(text).digest('hex').slice(0, 32)
 }
 
-// Reads the model: prefers the JSON form (machine truth); falls back to importing
-// the TS form under bun for repos that author it in TS. Returns the parsed
-// constitution AND the raw text the hash is taken over.
+// Reads the model: prefers the JSON form (machine truth); falls back to importing the TS
+// form under bun. Returns the parsed constitution AND the raw text the hash is taken over.
 export async function readModel(root: string): Promise<{ model: Constitution; raw: string }> {
   const p = paths(root)
   if (existsSync(p.modelJson)) {
@@ -156,30 +255,89 @@ export async function readModel(root: string): Promise<{ model: Constitution; ra
   throw new VaderError(`no constitution model at ${p.modelJson} or ${p.modelTs}`)
 }
 
-// ---------- toolchain detection ----------
+// ---------- git ----------
 
-export type Gate = { repoCheck: string[]; note?: string }
+function git(root: string, args: string[]): string {
+  return execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim()
+}
 
-export function detectGate(root: string): Gate {
+function commitExists(root: string, commit: string): boolean {
+  try {
+    git(root, ['cat-file', '-e', `${commit}^{commit}`])
+    return true
+  } catch {
+    return false
+  }
+}
+
+function changedSince(root: string, commit: string): string[] {
+  const out = git(root, ['diff', '--name-only', `${commit}..HEAD`])
+  return out === '' ? [] : out.split('\n')
+}
+
+function staleness(root: string, commit: string | null, watch: string[]): Staleness {
+  if (commit === null) return { commit, stale: true, reason: 'no-stamp', changed: [] }
+  if (!commitExists(root, commit)) return { commit, stale: true, reason: 'missing-commit', changed: [] }
+  const changed = changedSince(root, commit).filter((f) => watch.some((w) => f.startsWith(w)))
+  return changed.length > 0
+    ? { commit, stale: true, reason: 'watch-touched', changed }
+    : { commit, stale: false, reason: null, changed: [] }
+}
+
+// ---------- toolchain + fallow detection ----------
+
+export type GateConfig = { repoCheck: string[]; fallowCheck?: string[]; note?: string }
+
+// A binary resolves if invoking it does not fail with ENOENT. A nonzero exit (e.g. an
+// unknown flag) still means the binary is on PATH.
+function binaryResolves(bin: string): boolean {
+  try {
+    execFileSync(bin, ['--version'], { stdio: 'ignore' })
+    return true
+  } catch (e) {
+    return (e as { code?: string }).code !== 'ENOENT'
+  }
+}
+
+function detectFallow(root: string): string[] | undefined {
+  const configured =
+    existsSync(join(root, '.fallowrc.jsonc')) ||
+    existsSync(join(root, '.fallowrc.json')) ||
+    existsSync(join(root, '.fallowrc'))
+  if (!configured || !binaryResolves('fallow')) return undefined
+  return ['fallow', 'audit', '--gate', 'new-only']
+}
+
+export function detectGate(root: string): GateConfig {
+  const fallowCheck = detectFallow(root)
+  const withFallow = (g: GateConfig): GateConfig => (fallowCheck ? { ...g, fallowCheck } : g)
   if (existsSync(join(root, 'package.json'))) {
     const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as {
       scripts?: Record<string, string>
     }
-    if (pkg.scripts?.check) return { repoCheck: ['bun', 'run', 'check'] }
-    if (existsSync(join(root, 'tsconfig.json'))) return { repoCheck: ['bunx', 'tsc', '--noEmit'] }
-    return { repoCheck: ['bun', 'test'] }
+    if (pkg.scripts?.check) return withFallow({ repoCheck: ['bun', 'run', 'check'] })
+    if (existsSync(join(root, 'tsconfig.json'))) return withFallow({ repoCheck: ['bunx', 'tsc', '--noEmit'] })
+    return withFallow({ repoCheck: ['bun', 'test'] })
   }
   if (existsSync(join(root, 'pyproject.toml')) || existsSync(join(root, 'setup.py')))
-    return { repoCheck: ['pytest', '-q'] }
-  if (existsSync(join(root, 'Cargo.toml'))) return { repoCheck: ['cargo', 'check'] }
-  if (existsSync(join(root, 'go.mod'))) return { repoCheck: ['go', 'build', './...'] }
-  return {
+    return withFallow({ repoCheck: ['pytest', '-q'] })
+  if (existsSync(join(root, 'Cargo.toml'))) return withFallow({ repoCheck: ['cargo', 'check'] })
+  if (existsSync(join(root, 'go.mod'))) return withFallow({ repoCheck: ['go', 'build', './...'] })
+  return withFallow({
     repoCheck: ['echo', 'TODO: set repoCheck in .vader/gate.json'],
     note: 'no toolchain detected; fill in the real check command',
-  }
+  })
 }
 
-export function cmdInit(root: string): { created: string[]; gate: Gate } {
+// ---------- init ----------
+
+const GROUNDING_STUB = `# Grounding (stable layer)
+
+Written by the session, stamped via state.json. Refresh only when recall flags it stale.
+Sections: glossary, module graph, integration seams, cross-cutting conventions, the mantra.
+`
+
+export function cmdInit(root: string): { created: string[]; gate: GateConfig } {
   const p = paths(root)
   const created: string[] = []
   for (const d of [p.dir, p.generated, p.spec, p.runs]) {
@@ -195,6 +353,16 @@ export function cmdInit(root: string): { created: string[]; gate: Gate } {
   if (!existsSync(p.ledger)) {
     writeFileSync(p.ledger, '')
     created.push('.vader/LEDGER.jsonl')
+  }
+  for (const [file, body] of [
+    [p.grounding, GROUNDING_STUB],
+    [p.decisions, '# Decisions\n\nAppend-only ADR log, written by vader persist.\n'],
+    [p.conventions, '# Conventions\n\nFrozen conventions with origin run, written by vader persist.\n'],
+  ] as const) {
+    if (!existsSync(file)) {
+      writeFileSync(file, body)
+      created.push(relative(root, file))
+    }
   }
   const gate = detectGate(root)
   if (!existsSync(p.gate)) {
@@ -238,8 +406,8 @@ export function globToRegExp(glob: string): RegExp {
   return new RegExp('^' + out + '$')
 }
 
-// A generated dependency check: a standalone bun script that scans `from` files
-// for imports matching `to` and exits nonzero on any violation.
+// A generated dependency check: a standalone bun script that scans `from` files for imports
+// matching `to` and exits nonzero on any violation.
 function genDependency(inv: Invariant, check: DependencyCheck): { file: string; body: string } {
   const { from, to } = check.forbidImport
   const fromRe = globToRegExp(from)
@@ -280,8 +448,8 @@ console.log('${inv.id} ok')
   return { file: `checks/dep-${inv.id}.ts`, body }
 }
 
-// A generated data-law check: seeded-input property test, zero-dep.
-// The repo provides .vader/laws/law-<id>.ts exporting law(input): boolean.
+// A generated data-law check: seeded-input property test, zero-dep. The repo provides
+// .vader/laws/law-<id>.ts exporting law(input): boolean.
 function genData(inv: Invariant, check: DataCheck): { file: string; body: string } {
   const lawImport = `../../laws/law-${inv.id}.ts`
   const body = `import { test, expect } from 'bun:test'
@@ -304,8 +472,8 @@ test('${inv.id}: ${check.law.replace(/'/g, "\\'")}', () => {
   return { file: `checks/data-${inv.id}.test.ts`, body }
 }
 
-// A generated shape check (TS gold path): branded nominal types + a type-level
-// test whose @ts-expect-error lines FAIL to compile if the distinction is lost.
+// A generated shape check (TS gold path): branded nominal types + a type-level test whose
+// expect-error lines FAIL to compile if the distinction is lost.
 function genShape(inv: Invariant, check: ShapeCheck): { file: string; body: string }[] {
   const [A, B] = check.distinct
   const types = `// GENERATED by vader from invariant ${inv.id}. Do not edit.
@@ -351,9 +519,9 @@ test('${inv.id}: ${inv.statement.replace(/'/g, "\\'")}', () => {
   return { file: `checks/behavioral-${inv.id}.test.ts`, body }
 }
 
-export async function cmdGen(root: string): Promise<{ written: string[] }> {
+export async function cmdGen(root: string): Promise<{ written: string[]; modelHash: string }> {
   const p = paths(root)
-  const { model } = await readModel(root)
+  const { model, raw } = await readModel(root)
   const checksDir = join(p.generated, 'checks')
   if (existsSync(checksDir)) rmSync(checksDir, { recursive: true })
   mkdirSync(checksDir, { recursive: true })
@@ -371,7 +539,14 @@ export async function cmdGen(root: string): Promise<{ written: string[] }> {
       written.push(relative(root, fp))
     }
   }
-  return { written }
+  // Lock the hash of the model just compiled: from now on the gate fails closed if the
+  // on-disk model is edited without a re-gen. This is where the anti-decay lock engages
+  // (after the P0 human freeze, and again after an approved model change re-compiles).
+  const state = loadState(root)
+  const modelHash = hashModel(raw)
+  state.modelHash = modelHash
+  saveState(root, state)
+  return { written, modelHash }
 }
 
 // ---------- gate ----------
@@ -380,6 +555,7 @@ export type GateResult = {
   pass: boolean
   modelHashLocked: boolean
   repoCheck: { cmd: string; pass: boolean } | null
+  fallow: { cmd: string; pass: boolean } | null
   invariants: { id: string; pass: boolean; detail: string }[]
 }
 
@@ -400,8 +576,9 @@ export async function cmdGate(root: string): Promise<GateResult> {
   const state = loadState(root)
   const { model, raw } = await readModel(root)
   const modelHashLocked = state.modelHash === null || state.modelHash === hashModel(raw)
-  const gateCfg = JSON.parse(readFileSync(p.gate, 'utf8')) as Gate
+  const gateCfg = JSON.parse(readFileSync(p.gate, 'utf8')) as GateConfig
   const repo = runCheck(root, gateCfg.repoCheck)
+  const fallow = gateCfg.fallowCheck ? runCheck(root, gateCfg.fallowCheck) : null
   const invariants: { id: string; pass: boolean; detail: string }[] = []
   for (const inv of model.invariants) {
     let r: { pass: boolean; detail: string }
@@ -424,19 +601,405 @@ export async function cmdGate(root: string): Promise<GateResult> {
     else r = { pass: false, detail: 'unknown check kind' }
     invariants.push({ id: inv.id, pass: r.pass, detail: r.detail })
   }
-  const pass = modelHashLocked && repo.pass && invariants.every((i) => i.pass)
+  const pass = modelHashLocked && repo.pass && (fallow?.pass ?? true) && invariants.every((i) => i.pass)
   return {
     pass,
     modelHashLocked,
     repoCheck: { cmd: gateCfg.repoCheck.join(' '), pass: repo.pass },
+    fallow: fallow ? { cmd: gateCfg.fallowCheck!.join(' '), pass: fallow.pass } : null,
     invariants,
   }
 }
 
-// ---------- recall + persist ----------
+// ---------- run report validation (hand-rolled, named paths in every error) ----------
 
-export async function cmdRecall(root: string): Promise<unknown> {
+function fail(path: string, msg: string): never {
+  throw new VaderError(`invalid report: ${path} ${msg}`)
+}
+
+function obj(value: unknown, path: string): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) fail(path, 'must be an object')
+  return value as Record<string, unknown>
+}
+
+function str(value: unknown, path: string): string {
+  if (typeof value !== 'string' || value === '') fail(path, 'must be a non-empty string')
+  return value
+}
+
+function arr(value: unknown, path: string): unknown[] {
+  if (!Array.isArray(value)) fail(path, 'must be an array')
+  return value
+}
+
+function oneOf<T extends string>(value: unknown, path: string, allowed: readonly T[]): T {
+  if (typeof value !== 'string' || !(allowed as readonly string[]).includes(value)) {
+    fail(path, `must be one of: ${allowed.join(', ')}`)
+  }
+  return value as T
+}
+
+function modelChangeOf(value: unknown, path: string): ModelChange {
+  const m = obj(value, path)
+  return {
+    proposedBy: str(m.proposedBy, `${path}.proposedBy`),
+    reason: str(m.reason, `${path}.reason`),
+    diff: str(m.diff, `${path}.diff`),
+  }
+}
+
+export function validateReport(input: unknown): RunReport {
+  const r = obj(input, 'report')
+  const run = obj(r.run, 'run')
+  const report: RunReport = {
+    run: {
+      id: str(run.id, 'run.id'),
+      mode: oneOf(run.mode, 'run.mode', ['build', 'review'] as const),
+      spec: str(run.spec, 'run.spec'),
+      commitRange: str(run.commitRange, 'run.commitRange'),
+      gate: oneOf(run.gate, 'run.gate', ['green', 'residual', 'failed'] as const),
+    },
+    slices: arr(r.slices, 'slices').map((s, i) => {
+      const slice = obj(s, `slices[${i}]`)
+      return {
+        id: str(slice.id, `slices[${i}].id`),
+        class: str(slice.class, `slices[${i}].class`),
+        owner: str(slice.owner, `slices[${i}].owner`),
+        verdict: oneOf(slice.verdict, `slices[${i}].verdict`, ['accept', 'bounce'] as const),
+        bounces: arr(slice.bounces, `slices[${i}].bounces`).map((b, j) => {
+          const bounce = obj(b, `slices[${i}].bounces[${j}]`)
+          return {
+            ac: str(bounce.ac, `slices[${i}].bounces[${j}].ac`),
+            reason: str(bounce.reason, `slices[${i}].bounces[${j}].reason`),
+          }
+        }),
+      }
+    }),
+    risks: (() => {
+      const risks = obj(r.risks, 'risks')
+      return {
+        new: arr(risks.new, 'risks.new').map((x, i) => {
+          const risk = obj(x, `risks.new[${i}]`)
+          return {
+            id: str(risk.id, `risks.new[${i}].id`),
+            desc: str(risk.desc, `risks.new[${i}].desc`),
+            owner: str(risk.owner, `risks.new[${i}].owner`),
+            severity: oneOf(risk.severity, `risks.new[${i}].severity`, ['low', 'medium', 'high'] as const),
+          }
+        }),
+        dispositions: arr(risks.dispositions, 'risks.dispositions').map((x, i) => {
+          const d = obj(x, `risks.dispositions[${i}]`)
+          return {
+            riskId: str(d.riskId, `risks.dispositions[${i}].riskId`),
+            action: oneOf(d.action, `risks.dispositions[${i}].action`, ['finding', 'defer', 'close'] as const),
+            reason: str(d.reason, `risks.dispositions[${i}].reason`),
+          }
+        }),
+      }
+    })(),
+    decisions: arr(r.decisions, 'decisions').map((x, i) => {
+      const d = obj(x, `decisions[${i}]`)
+      const out: RunReport['decisions'][number] = {
+        id: str(d.id, `decisions[${i}].id`),
+        title: str(d.title, `decisions[${i}].title`),
+        body: str(d.body, `decisions[${i}].body`),
+      }
+      if (d.supersedes !== undefined) out.supersedes = str(d.supersedes, `decisions[${i}].supersedes`)
+      return out
+    }),
+    conventions: arr(r.conventions, 'conventions').map((x, i) => {
+      const c = obj(x, `conventions[${i}]`)
+      return { id: str(c.id, `conventions[${i}].id`), rule: str(c.rule, `conventions[${i}].rule`) }
+    }),
+  }
+  if (r.itemId !== undefined) report.itemId = str(r.itemId, 'itemId')
+  if (r.modelChange !== undefined) report.modelChange = modelChangeOf(r.modelChange, 'modelChange')
+  if (r.stamps !== undefined) {
+    const stamps = obj(r.stamps, 'stamps')
+    report.stamps = {}
+    if (stamps.grounding !== undefined) {
+      const g = obj(stamps.grounding, 'stamps.grounding')
+      report.stamps.grounding = {
+        commit: str(g.commit, 'stamps.grounding.commit'),
+        watch: arr(g.watch, 'stamps.grounding.watch').map((w, i) => str(w, `stamps.grounding.watch[${i}]`)),
+      }
+    }
+    if (stamps.partition !== undefined) {
+      const pt = obj(stamps.partition, 'stamps.partition')
+      report.stamps.partition = {
+        commit: str(pt.commit, 'stamps.partition.commit'),
+        slices: arr(pt.slices, 'stamps.partition.slices').map((s, i) => {
+          const slice = obj(s, `stamps.partition.slices[${i}]`)
+          return {
+            id: str(slice.id, `stamps.partition.slices[${i}].id`),
+            class: str(slice.class, `stamps.partition.slices[${i}].class`),
+            paths: arr(slice.paths, `stamps.partition.slices[${i}].paths`).map((x, j) =>
+              str(x, `stamps.partition.slices[${i}].paths[${j}]`),
+            ),
+          }
+        }),
+      }
+    }
+  }
+  return report
+}
+
+// ---------- triage ----------
+
+export function cmdTriage(
+  root: string,
+  riskId: string,
+  action: TriageAction,
+  reason: string,
+): { pending: State['pendingTriage'] } {
   const state = loadState(root)
+  const risk = state.risks.find((r) => r.id === riskId && r.status === 'open')
+  if (risk === undefined) throw new VaderError(`unknown risk or not open: ${riskId}`)
+  if (reason === '') throw new VaderError('a triage disposition requires a reason')
+  state.pendingTriage = state.pendingTriage.filter((t) => t.riskId !== riskId)
+  state.pendingTriage.push({ riskId, action, reason })
+  saveState(root, state)
+  return { pending: state.pendingTriage }
+}
+
+// ---------- ratchet (evidence-derived from the ledger) ----------
+
+function classClean(line: RunLine, cls: string): boolean | null {
+  const slices = line.slices.filter((s) => s.class === cls)
+  if (slices.length === 0) return null // run did not touch the class: no evidence either way
+  return line.gate === 'green' && slices.every((s) => s.verdict === 'accept')
+}
+
+function consecutiveClean(ledger: LedgerLine[], cls: string): number {
+  const runs = ledger.filter((l): l is RunLine => l.type === 'run')
+  let count = 0
+  for (let i = runs.length - 1; i >= 0; i--) {
+    const run = runs[i]
+    if (run === undefined) break
+    const clean = classClean(run, cls)
+    if (clean === null) continue
+    if (!clean) break
+    count++
+  }
+  return count
+}
+
+function computeRatchet(state: State, ledger: LedgerLine[], filter?: string): RatchetClass[] {
+  const seen = new Set<string>()
+  for (const line of ledger) {
+    if (line.type === 'run') for (const s of line.slices) seen.add(s.class)
+  }
+  for (const cls of Object.keys(state.ratchet.grants)) seen.add(cls)
+  const classes = filter !== undefined ? [filter] : [...seen].sort()
+  return classes.map((cls) => {
+    const neverRatchet = state.ratchet.neverRatchet.includes(cls)
+    const clean = consecutiveClean(ledger, cls)
+    const eligible = neverRatchet ? 0 : clean >= LEVELS.L2_CLEAN_RUNS ? 2 : clean >= LEVELS.L1_CLEAN_RUNS ? 1 : 0
+    return { class: cls, level: state.ratchet.grants[cls]?.level ?? 0, eligible, consecutiveClean: clean, neverRatchet }
+  })
+}
+
+export function cmdRatchet(
+  root: string,
+  cls?: string,
+  opts?: { grant: number; approvedBy: string },
+): { classes: RatchetClass[] } {
+  const state = loadState(root)
+  const ledger = readLedger(root)
+  if (opts !== undefined) {
+    if (cls === undefined) throw new VaderError('grant requires a class')
+    if (opts.approvedBy === '') throw new VaderError('grant requires an approver (--approved-by)')
+    const computed = computeRatchet(state, ledger, cls)[0]
+    if (computed === undefined || computed.neverRatchet) throw new VaderError(`never-ratchet class: ${cls}`)
+    if (opts.grant > computed.eligible) {
+      throw new VaderError(
+        `class ${cls} is not eligible for L${opts.grant} (eligible: L${computed.eligible}, consecutive clean runs: ${computed.consecutiveClean})`,
+      )
+    }
+    state.ratchet.grants[cls] = { level: opts.grant, approvedBy: opts.approvedBy, date: new Date().toISOString() }
+    saveState(root, state)
+  }
+  return { classes: computeRatchet(state, ledger, cls) }
+}
+
+// ---------- persist (build + review, triage-gated, anti-decay aware) ----------
+
+export type PersistResult = {
+  run: string
+  item: { id: string; status: RoadmapStatus } | null
+  modelChangeParked: boolean
+  risksClosed: string[]
+  risksDeferred: string[]
+  risksNew: string[]
+  bounces: number
+  demoted: string[]
+  stampsAdvanced: string[]
+}
+
+export function cmdPersist(root: string, reportInput: RunReport | string): PersistResult {
+  const state = loadState(root)
+  const ledger = readLedger(root)
+  const raw: unknown = typeof reportInput === 'string' ? JSON.parse(readFileSync(reportInput, 'utf8')) : reportInput
+  const report = validateReport(raw)
+  const runId = report.run.id
+
+  // -- validate everything before writing anything --
+  if (ledger.some((l) => l.type === 'run' && l.id === runId)) throw new VaderError(`duplicate run id: ${runId}`)
+
+  const item =
+    report.itemId !== undefined ? state.roadmap.find((r) => r.id === report.itemId) : undefined
+  if (report.itemId !== undefined && item === undefined)
+    throw new VaderError(`unknown roadmap item ${report.itemId}`)
+
+  const dispositions = new Map<string, { action: TriageAction; reason: string }>()
+  for (const t of state.pendingTriage) dispositions.set(t.riskId, { action: t.action, reason: t.reason })
+  for (const d of report.risks.dispositions) dispositions.set(d.riskId, { action: d.action, reason: d.reason }) // report wins
+
+  for (const riskId of dispositions.keys()) {
+    if (!state.risks.some((r) => r.id === riskId && r.status === 'open'))
+      throw new VaderError(`unknown risk or not open: ${riskId}`)
+  }
+  const undispositioned = state.risks.filter((r) => r.status === 'open' && !dispositions.has(r.id)).map((r) => r.id)
+  if (undispositioned.length > 0) {
+    throw new VaderError(
+      `undispositioned open risks: ${undispositioned.join(', ')}. Triage every open risk (finding, defer, or close) before persist.`,
+    )
+  }
+  for (const risk of report.risks.new) {
+    if (state.risks.some((r) => r.id === risk.id)) throw new VaderError(`duplicate risk id: ${risk.id}`)
+  }
+  const knownDecisions = new Set(state.decisions)
+  for (const d of report.decisions) {
+    if (d.supersedes !== undefined && !knownDecisions.has(d.supersedes))
+      throw new VaderError(`unknown decision: ${d.supersedes} (supersedes target was never recorded)`)
+    knownDecisions.add(d.id)
+  }
+
+  // -- apply in memory --
+  const risksClosed: string[] = []
+  const risksDeferred: string[] = []
+  for (const [riskId, d] of dispositions) {
+    const risk = state.risks.find((r) => r.id === riskId)
+    if (risk === undefined) continue
+    risk.history.push({ run: runId, action: d.action, reason: d.reason })
+    if (d.action === 'defer') {
+      risksDeferred.push(riskId)
+    } else {
+      risk.status = 'closed'
+      risksClosed.push(riskId)
+    }
+  }
+  state.pendingTriage = []
+  for (const risk of report.risks.new) {
+    state.risks.push({ ...risk, originRun: runId, status: 'open', history: [] })
+  }
+  for (const d of report.decisions) state.decisions.push(d.id)
+
+  // anti-decay: a run may PROPOSE a model change, never apply it. Parking blocks the item.
+  const modelChangeParked = report.modelChange !== undefined
+  if (report.modelChange !== undefined) state.pendingModelChange = report.modelChange
+
+  // build-mode roadmap item: green and unblocked -> done; otherwise blocked.
+  if (item !== undefined) {
+    item.status = !modelChangeParked && report.run.gate === 'green' ? 'done' : 'blocked'
+  }
+
+  // ratchet demotion: any bounce or non-green gate in a class zeroes its grant
+  const demoted: string[] = []
+  const runClasses = new Set(report.slices.map((s) => s.class))
+  for (const cls of runClasses) {
+    const slices = report.slices.filter((s) => s.class === cls)
+    const dirty = report.run.gate !== 'green' || slices.some((s) => s.verdict === 'bounce' || s.bounces.length > 0)
+    const grant = state.ratchet.grants[cls]
+    if (dirty && grant !== undefined && grant.level > 0) {
+      grant.level = 0
+      grant.note = `auto-demoted by run ${runId}`
+      demoted.push(cls)
+    }
+  }
+
+  const stampsAdvanced: string[] = []
+  if (report.stamps?.grounding !== undefined) {
+    state.grounding = { commit: report.stamps.grounding.commit, watch: report.stamps.grounding.watch }
+    stampsAdvanced.push('grounding')
+  }
+  if (report.stamps?.partition !== undefined) {
+    state.partition = { commit: report.stamps.partition.commit, slices: report.stamps.partition.slices }
+    stampsAdvanced.push('partition')
+  }
+
+  // -- write: ledger append, prose appends, then state last (atomic rename) --
+  const p = paths(root)
+  const date = new Date().toISOString()
+  const lines: LedgerLine[] = [
+    {
+      type: 'run',
+      id: runId,
+      date,
+      mode: report.run.mode,
+      spec: report.run.spec,
+      commitRange: report.run.commitRange,
+      gate: report.run.gate,
+      slices: report.slices.map((s) => ({ id: s.id, class: s.class, verdict: s.verdict })),
+    },
+  ]
+  let bounces = 0
+  for (const s of report.slices) {
+    for (const b of s.bounces) {
+      bounces++
+      lines.push({ type: 'bounce', run: runId, slice: s.id, class: s.class, ac: b.ac, reason: b.reason })
+    }
+  }
+  appendFileSync(p.ledger, lines.map((l) => JSON.stringify(l)).join('\n') + '\n')
+
+  for (const d of report.decisions) {
+    const supersedes = d.supersedes !== undefined ? `\nSupersedes: ${d.supersedes}` : ''
+    appendFileSync(p.decisions, `\n## ${d.id}: ${d.title}\n\nStatus: active (run: ${runId}, ${date})${supersedes}\n\n${d.body}\n`)
+  }
+  for (const c of report.conventions) {
+    appendFileSync(p.conventions, `\n- ${c.id} (run: ${runId}): ${c.rule}\n`)
+  }
+
+  saveState(root, state)
+  return {
+    run: runId,
+    item: item !== undefined ? { id: item.id, status: item.status } : null,
+    modelChangeParked,
+    risksClosed,
+    risksDeferred,
+    risksNew: report.risks.new.map((r) => r.id),
+    bounces,
+    demoted,
+    stampsAdvanced,
+  }
+}
+
+// ---------- recall (verify-before-trust rehydration packet) ----------
+
+export type RecallPacket = {
+  modelHash: string | null
+  modelOk: boolean
+  invariantCount: number
+  roadmap: { id: string; status: RoadmapStatus }[]
+  nextItem: RoadmapItem | null
+  pendingModelChange: ModelChange | null
+  grounding: Staleness
+  partition: { commit: string | null; stale: boolean; reason: Staleness['reason']; staleSlices: { id: string; changed: string[] }[] }
+  openRisks: Risk[]
+  mustTriage: Risk[]
+  pendingTriage: State['pendingTriage']
+  decisions: { file: string; count: number }
+  conventions: { file: string }
+  topBounces: { class: string; reason: string; count: number }[]
+  ratchet: RatchetClass[]
+  lastRun: { id: string; date: string; mode: Mode; gate: Gate; commitRange: string } | null
+  runCount: number
+}
+
+export async function cmdRecall(root: string): Promise<RecallPacket> {
+  const state = loadState(root)
+  const ledger = readLedger(root)
+
   let modelOk = false
   let invariantCount = 0
   try {
@@ -446,67 +1009,76 @@ export async function cmdRecall(root: string): Promise<unknown> {
   } catch {
     // model may be absent before P0; recall still works so the loop can bootstrap.
   }
+
+  const partitionBase = staleness(root, state.partition.commit, [])
+  const staleSlices: { id: string; changed: string[] }[] = []
+  if (state.partition.commit !== null && partitionBase.reason !== 'missing-commit') {
+    const changed = changedSince(root, state.partition.commit)
+    for (const slice of state.partition.slices) {
+      const hits = changed.filter((f) => slice.paths.some((w) => f.startsWith(w)))
+      if (hits.length > 0) staleSlices.push({ id: slice.id, changed: hits })
+    }
+  }
+  const partitionStale = partitionBase.reason === 'no-stamp' || partitionBase.reason === 'missing-commit' || staleSlices.length > 0
+
+  const bounceCounts = new Map<string, number>()
+  for (const line of ledger) {
+    if (line.type !== 'bounce') continue
+    const key = `${line.class} ${line.reason}`
+    bounceCounts.set(key, (bounceCounts.get(key) ?? 0) + 1)
+  }
+  const topBounces = [...bounceCounts.entries()]
+    .map(([key, count]) => {
+      const [cls = '', reason = ''] = key.split(' ')
+      return { class: cls, reason, count }
+    })
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 10)
+
+  const runs = ledger.filter((l): l is RunLine => l.type === 'run')
+  const last = runs[runs.length - 1]
   const next = state.roadmap.find((r) => r.status === 'pending') ?? null
+
   return {
     modelHash: state.modelHash,
     modelOk,
     invariantCount,
     roadmap: state.roadmap.map((r) => ({ id: r.id, status: r.status })),
     nextItem: next,
-    openRisks: state.risks.filter((r) => r.status === 'open'),
     pendingModelChange: state.pendingModelChange,
-    ratchet: state.ratchet,
+    grounding: staleness(root, state.grounding.commit, state.grounding.watch),
+    partition: {
+      commit: state.partition.commit,
+      stale: partitionStale,
+      reason: partitionStale ? (staleSlices.length > 0 ? 'watch-touched' : partitionBase.reason) : null,
+      staleSlices,
+    },
+    openRisks: state.risks.filter((r) => r.status === 'open'),
+    mustTriage: state.risks.filter((r) => r.status === 'open'),
+    pendingTriage: state.pendingTriage,
+    decisions: { file: '.vader/DECISIONS.md', count: state.decisions.length },
+    conventions: { file: '.vader/CONVENTIONS.md' },
+    topBounces,
+    ratchet: computeRatchet(state, ledger),
+    lastRun: last !== undefined ? { id: last.id, date: last.date, mode: last.mode, gate: last.gate, commitRange: last.commitRange } : null,
+    runCount: runs.length,
   }
-}
-
-export type TickReport = {
-  itemId: string
-  gate: GateResult
-  newRisks?: { id: string; desc: string }[]
-  modelChange?: { proposedBy: string; reason: string; diff: string }
-}
-
-export function cmdPersist(root: string, report: TickReport): { ok: true; item: RoadmapItem } {
-  const state = loadState(root)
-  const item = state.roadmap.find((r) => r.id === report.itemId)
-  if (item === undefined) throw new VaderError(`unknown roadmap item ${report.itemId}`)
-  // anti-decay: a tick may PROPOSE a model change, never apply it.
-  if (report.modelChange) {
-    state.pendingModelChange = report.modelChange
-    item.status = 'blocked'
-  } else if (report.gate.pass) {
-    item.status = 'done'
-    state.ratchet.consecutiveCleanTicks += 1
-  } else {
-    item.status = 'blocked'
-    state.ratchet.consecutiveCleanTicks = 0
-  }
-  for (const r of report.newRisks ?? [])
-    if (!state.risks.some((x) => x.id === r.id))
-      state.risks.push({ id: r.id, desc: r.desc, status: 'open' })
-  appendFileSync(
-    paths(root).ledger,
-    JSON.stringify({
-      type: 'tick',
-      itemId: report.itemId,
-      gatePass: report.gate.pass,
-      failed: report.gate.invariants.filter((i) => !i.pass).map((i) => i.id),
-    }) + '\n',
-  )
-  saveState(root, state)
-  return { ok: true, item }
 }
 
 // ---------- CLI ----------
 
-const USAGE = `usage: vader <command> [--root <dir>]
+const USAGE = `usage: vader <command> [args] [--root <dir>]
 
 commands:
-  init                   scaffold .vader/ (idempotent); detects toolchain, stubs gate.json
-  gen                    compile the constitution model into .vader/generated/ checks
-  gate                   run repo-check + invariant checks; JSON pass/fail by invariant id
-  recall                 emit the tick rehydration packet (JSON)
-  persist <report.json>  close a tick: mark item, park model proposals, append ledger`
+  init                                    scaffold .vader/ (idempotent); detect toolchain + fallow
+  gen                                     compile the constitution model into .vader/generated/ checks
+  gate                                    repo-check + fallow + invariant checks; JSON pass/fail by id
+  recall                                  emit the verify-before-trust rehydration packet (JSON)
+  triage [<risk-id> <action> --reason <text>]
+                                          record a disposition (finding|defer|close); bare lists open risks
+  persist <run-report.json>               close the loop: validate, gate on triage, append ledger, advance stamps
+  ratchet [<class>] [--grant <level> --approved-by <name>]
+                                          advisory autonomy verdicts; grant only with named human approval`
 
 function flag(args: string[], name: string): string | undefined {
   const i = args.indexOf(name)
@@ -519,6 +1091,9 @@ function flag(args: string[], name: string): string | undefined {
 async function main(argv: string[]): Promise<number> {
   const args = [...argv]
   const root = flag(args, '--root') ?? process.cwd()
+  const reason = flag(args, '--reason')
+  const grant = flag(args, '--grant')
+  const approvedBy = flag(args, '--approved-by')
   const [command, ...rest] = args
   try {
     switch (command) {
@@ -536,10 +1111,28 @@ async function main(argv: string[]): Promise<number> {
       case 'recall':
         print(await cmdRecall(root))
         return 0
+      case 'triage': {
+        const [riskId, action] = rest
+        if (riskId === undefined) {
+          const state = loadState(root)
+          print({ openRisks: state.risks.filter((r) => r.status === 'open'), pendingTriage: state.pendingTriage })
+          return 0
+        }
+        if (action !== 'finding' && action !== 'defer' && action !== 'close')
+          throw new VaderError('triage action must be finding, defer, or close')
+        print(cmdTriage(root, riskId, action, reason ?? ''))
+        return 0
+      }
       case 'persist': {
         const [reportPath] = rest
-        if (reportPath === undefined) throw new VaderError('persist requires a report.json path')
-        print(cmdPersist(root, JSON.parse(readFileSync(reportPath, 'utf8')) as TickReport))
+        if (reportPath === undefined) throw new VaderError('persist requires a run-report.json path')
+        print(cmdPersist(root, reportPath))
+        return 0
+      }
+      case 'ratchet': {
+        const [cls] = rest
+        const opts = grant !== undefined ? { grant: Number(grant), approvedBy: approvedBy ?? '' } : undefined
+        print(cmdRatchet(root, cls, opts))
         return 0
       }
       default:

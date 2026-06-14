@@ -7,8 +7,8 @@ never collapse. Everything else in `.vader/` is generated or derived.
 Two rules govern it:
 
 1. **The model is human-gated.** It is frozen at conceive (P0) and changed only through a
-   parked, human-approved proposal. `vader init` locks its hash; `vader gate` fails closed
-   if the on-disk model no longer matches the lock.
+   parked, human-approved proposal. `vader gen` locks its hash when it compiles the model;
+   `vader gate` fails closed if the on-disk model no longer matches the lock.
 2. **`generated/` is never hand-edited.** `vader gen` owns `.vader/generated/checks/`
    entirely. If a check is wrong, the model is wrong. Fix the model and regenerate.
 
@@ -112,3 +112,12 @@ opaque to the router and earns none of the gold-path guarantees.
 
 The `kind` on a `rawCheck` invariant is free text; the router dispatches on the `check`
 shape, not the kind label.
+
+## Where this fits
+
+The constitution is the protected source of truth the rest of the factory is built around.
+`references/protocol.md` is the phase pipeline that freezes it (P0) and parks any later change.
+`references/recipes.md` is how a tick fans out owners and verifiers against the checks `vader
+gen` compiles here. `references/acceptance-gate.md` is the verifier law: a missing distinction
+surfaced there becomes a `modelChange` proposal at persist, parked for the human gate and never
+applied by the loop.
