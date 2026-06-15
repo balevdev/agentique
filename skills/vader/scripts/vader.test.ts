@@ -403,6 +403,39 @@ test('AC-lock: re-gen after a gate.json change re-locks the enforcement surface'
   expect(res.pass).toBe(true)
 })
 
+// ---------- gate: batched-shape attribution + model-order preservation ----------
+
+test('cmdGate preserves model order and attributes a batched shape failure to its own id only', async () => {
+  const root = tmpRepo()
+  cmdInit(root)
+  writeFileSync(paths(root).gate, JSON.stringify({ repoCheck: ['true'] }))
+  mkdirSync(join(root, '.vader', 'laws'), { recursive: true })
+  writeFileSync(join(root, '.vader', 'laws', 'law-d1.ts'), 'export const law = (_x: unknown): boolean => true\n')
+  writeFileSync(
+    paths(root).modelJson,
+    JSON.stringify({
+      concepts: {},
+      invariants: [
+        { id: 'shapeA', kind: 'shape', statement: 's', check: { distinct: ['PointA', 'IntervalA'] } },
+        { id: 'd1', kind: 'data', statement: 's', check: { law: 'x === x', sample: { kind: 'int', count: 10 } } },
+        { id: 'shapeB', kind: 'shape', statement: 's', check: { distinct: ['PointB', 'IntervalB'] } },
+      ],
+    }),
+  )
+  await cmdGen(root)
+  const clean = await cmdGate(root)
+  // model order is preserved regardless of which checks finish first
+  expect(clean.invariants.map((i) => i.id)).toEqual(['shapeA', 'd1', 'shapeB'])
+  expect(clean.invariants.every((i) => i.pass)).toBe(true)
+  // break only shapeA's compiled check; the batched tsc must fail shapeA and still pass shapeB
+  writeFileSync(join(paths(root).generated, 'checks', 'shape-shapeA.neg.ts'), 'export const broken: number = "x"\n')
+  const res = await cmdGate(root)
+  expect(res.invariants.map((i) => i.id)).toEqual(['shapeA', 'd1', 'shapeB'])
+  expect(res.invariants.find((i) => i.id === 'shapeA')?.pass).toBe(false)
+  expect(res.invariants.find((i) => i.id === 'shapeB')?.pass).toBe(true)
+  expect(res.invariants.find((i) => i.id === 'd1')?.pass).toBe(true)
+})
+
 // ---------- validateReport ----------
 
 test('validateReport names the exact missing path', () => {

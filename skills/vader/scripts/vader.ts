@@ -25,7 +25,8 @@ import {
   statSync,
 } from 'node:fs'
 import { join, relative } from 'node:path'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, execFile } from 'node:child_process'
+import { cpus } from 'node:os'
 import { createHash } from 'node:crypto'
 
 export class VaderError extends Error {}
@@ -621,18 +622,88 @@ export type GateResult = {
   invariants: { id: string; pass: boolean; detail: string }[]
 }
 
-function runCheck(root: string, cmd: string[]): { pass: boolean; detail: string } {
+// One check process. Async so the gate can run independent checks concurrently; the verdict
+// is exactly the child's exit code, so parallelism cannot change a pass/fail. Returns the FULL
+// output (callers slice for storage) because shape-batch attribution needs the whole tsc log.
+function runCheck(root: string, cmd: string[]): Promise<{ pass: boolean; out: string }> {
   const head = cmd[0]
-  if (head === undefined) return { pass: false, detail: 'empty command' }
-  try {
+  if (head === undefined) return Promise.resolve({ pass: false, out: 'empty command' })
+  return new Promise((resolve) => {
     // 64 MiB: a passing tsc/bun-test in a large repo can print well past the 1 MiB default,
     // and an overflow would otherwise surface as a false gate failure.
-    const out = execFileSync(head, cmd.slice(1), { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
-    return { pass: true, detail: out.slice(0, 400) }
-  } catch (e) {
-    const err = e as { stdout?: string; stderr?: string; message?: string }
-    return { pass: false, detail: (err.stderr || err.stdout || err.message || 'failed').slice(0, 400) }
+    execFile(head, cmd.slice(1), { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }, (err, stdout, stderr) => {
+      // Combine both streams: tsc writes diagnostics to stdout while a runner like bunx writes
+      // progress to stderr, and shape-batch attribution needs the diagnostic lines regardless of
+      // which stream carried them.
+      if (err) resolve({ pass: false, out: `${stdout || ''}\n${stderr || ''}`.trim() || err.message || 'failed' })
+      else resolve({ pass: true, out: stdout || '' })
+    })
+  })
+}
+
+const DETAIL_CAP = 400
+
+// Run items through fn with at most `limit` in flight, preserving input order in the result.
+// Order independence of the verdicts is the whole point: a slot scheduler cannot reorder a
+// pass into a fail, and re-indexing by position keeps the per-invariant report deterministic.
+async function pool<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length)
+  let next = 0
+  const width = Math.max(1, Math.min(limit, items.length))
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const i = next++
+      if (i >= items.length) return
+      results[i] = await fn(items[i] as T)
+    }
   }
+  await Promise.all(Array.from({ length: width }, worker))
+  return results
+}
+
+// The non-shape invariants each map to one process. Shape is handled by runShapeBatch, so it is
+// intentionally absent here; an unrecognized check shape fails closed.
+function invariantCmd(p: ReturnType<typeof paths>, root: string, inv: Invariant): string[] | null {
+  if ('rawCheck' in inv.check) return ['bash', '-c', inv.check.rawCheck]
+  if ('forbidImport' in inv.check) return ['bun', join(p.generated, 'checks', `dep-${inv.id}.ts`), root]
+  if ('law' in inv.check) return ['bun', 'test', join(p.generated, 'checks', `data-${inv.id}.test.ts`)]
+  if ('contractTest' in inv.check) return ['bun', 'test', join(p.generated, 'checks', `behavioral-${inv.id}.test.ts`)]
+  return null
+}
+
+// All shape neg files typecheck in ONE tsc invocation (a cold tsc start, ~0.9s, dominated the
+// serial gate; batching pays it once). tsc reports every error with its file path, so a failure
+// is attributed to the owning invariant by filename. Fail-closed safety: if tsc exits nonzero
+// but no error names a shape file (a global config error), every shape id fails rather than
+// silently passing.
+async function runShapeBatch(
+  p: ReturnType<typeof paths>,
+  root: string,
+  shapes: Invariant[],
+): Promise<Map<string, { pass: boolean; detail: string }>> {
+  const out = new Map<string, { pass: boolean; detail: string }>()
+  if (shapes.length === 0) return out
+  const files = shapes.map((s) => join(p.generated, 'checks', `shape-${s.id}.neg.ts`))
+  const res = await runCheck(root, ['bunx', 'tsc', '--noEmit', '--strict', '--skipLibCheck', ...files])
+  if (res.pass) {
+    for (const s of shapes) out.set(s.id, { pass: true, detail: 'ok' })
+    return out
+  }
+  const lines = res.out.split('\n')
+  const hits = new Map<string, string[]>()
+  let anyAttributed = false
+  for (const s of shapes) {
+    const matched = lines.filter((l) => l.includes(`shape-${s.id}.neg.ts`) || l.includes(`shape-${s.id}.types`))
+    if (matched.length > 0) anyAttributed = true
+    hits.set(s.id, matched)
+  }
+  for (const s of shapes) {
+    const matched = hits.get(s.id) ?? []
+    if (matched.length > 0) out.set(s.id, { pass: false, detail: matched.join('\n').slice(0, DETAIL_CAP) })
+    else if (!anyAttributed) out.set(s.id, { pass: false, detail: res.out.slice(0, DETAIL_CAP) })
+    else out.set(s.id, { pass: true, detail: 'ok' })
+  }
+  return out
 }
 
 export async function cmdGate(root: string): Promise<GateResult> {
@@ -644,30 +715,32 @@ export async function cmdGate(root: string): Promise<GateResult> {
   // any drift in generated/checks or gate.json flips this false and the gate fails closed.
   const enforcementLocked = state.enforcementHash === null || state.enforcementHash === enforcementHash(root)
   const gateCfg = validateGateConfig(JSON.parse(readFileSync(p.gate, 'utf8')), 'gate.json')
-  const repo = runCheck(root, gateCfg.repoCheck)
-  const fallow = gateCfg.fallowCheck ? runCheck(root, gateCfg.fallowCheck) : null
-  const invariants: { id: string; pass: boolean; detail: string }[] = []
-  for (const inv of model.invariants) {
-    let r: { pass: boolean; detail: string }
-    if ('rawCheck' in inv.check) r = runCheck(root, ['bash', '-c', inv.check.rawCheck])
-    else if ('forbidImport' in inv.check)
-      r = runCheck(root, ['bun', join(p.generated, 'checks', `dep-${inv.id}.ts`), root])
-    else if ('law' in inv.check)
-      r = runCheck(root, ['bun', 'test', join(p.generated, 'checks', `data-${inv.id}.test.ts`)])
-    else if ('distinct' in inv.check)
-      r = runCheck(root, [
-        'bunx',
-        'tsc',
-        '--noEmit',
-        '--strict',
-        '--skipLibCheck',
-        join(p.generated, 'checks', `shape-${inv.id}.neg.ts`),
-      ])
-    else if ('contractTest' in inv.check)
-      r = runCheck(root, ['bun', 'test', join(p.generated, 'checks', `behavioral-${inv.id}.test.ts`)])
-    else r = { pass: false, detail: 'unknown check kind' }
-    invariants.push({ id: inv.id, pass: r.pass, detail: r.detail })
-  }
+  // The repo check, fallow, the one shape-batch, and every non-shape invariant are mutually
+  // independent processes, so they run concurrently. Each verdict is its own child's exit code;
+  // the per-invariant list is re-sorted into model order afterward, so the report is identical
+  // to the old serial run on every host.
+  const shapes = model.invariants.filter((inv) => 'distinct' in inv.check)
+  const others = model.invariants.filter((inv) => !('distinct' in inv.check))
+  // Leave the parent thread and a core headroom; never drop below one worker.
+  const limit = Math.max(1, (cpus().length || 3) - 2)
+  const [repo, fallow, shapeResults, otherResults] = await Promise.all([
+    runCheck(root, gateCfg.repoCheck),
+    gateCfg.fallowCheck ? runCheck(root, gateCfg.fallowCheck) : Promise.resolve(null),
+    runShapeBatch(p, root, shapes),
+    pool(others, limit, async (inv) => {
+      const cmd = invariantCmd(p, root, inv)
+      if (cmd === null) return { id: inv.id, pass: false, detail: 'unknown check kind' }
+      const r = await runCheck(root, cmd)
+      return { id: inv.id, pass: r.pass, detail: r.out.slice(0, DETAIL_CAP) }
+    }),
+  ])
+  const byId = new Map<string, { pass: boolean; detail: string }>()
+  for (const [id, r] of shapeResults) byId.set(id, r)
+  for (const r of otherResults) byId.set(r.id, { pass: r.pass, detail: r.detail })
+  const invariants = model.invariants.map((inv) => {
+    const r = byId.get(inv.id) ?? { pass: false, detail: 'no result' }
+    return { id: inv.id, pass: r.pass, detail: r.detail }
+  })
   const pass =
     modelHashLocked && enforcementLocked && repo.pass && (fallow?.pass ?? true) && invariants.every((i) => i.pass)
   return {

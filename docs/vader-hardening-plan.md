@@ -55,6 +55,14 @@ Findings section 4. Measured target: 9-invariant gate ~3 s -> ~1.3 s.
   test: a model with two shape invariants, one collapsed; gate attributes the failure to the
   collapsed id only and passes the other. Report before/after wall-clock on the 9-invariant
   synthetic model.
+- **RESULT.** Done. `runCheck` is async (`execFile`); shape neg files run in one batched `tsc`
+  with per-id attribution by filename (fail-closed if a nonzero tsc names no shape file); the
+  remaining checks run through a bounded `pool` (`min(cpu-2, n)`); results re-sort to model order.
+  Measured warm, 9-invariant synthetic model (6 shape + 3 data) on this host: serial **6011 ms**
+  -> parallel/batched **~930 ms**, a **6.4x** reduction. Determinism and order verified by the new
+  test; all 54 tests green. One fix beyond the plan: combine stdout+stderr in `runCheck` because
+  `bunx` writes progress to stderr while `tsc` writes diagnostics to stdout, and attribution needs
+  the diagnostic lines.
 
 ## Batch C: the module split (seam-first, the barrel is the seam)
 
