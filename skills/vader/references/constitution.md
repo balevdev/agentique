@@ -10,7 +10,9 @@ Two rules govern it:
    parked, human-approved proposal. `vader gen` locks its hash when it compiles the model;
    `vader gate` fails closed if the on-disk model no longer matches the lock.
 2. **`generated/` is never hand-edited.** `vader gen` owns `.vader/generated/checks/`
-   entirely. If a check is wrong, the model is wrong. Fix the model and regenerate.
+   entirely. If a check is wrong, the model is wrong. Fix the model and regenerate. This is
+   mechanically enforced, not just a convention: `vader gen` locks an enforcement hash over the
+   generated checks and `gate.json`, and `vader gate` fails closed if either drifts.
 
 ## Shape
 

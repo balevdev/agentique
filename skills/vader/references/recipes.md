@@ -55,6 +55,13 @@ A slice is accepted only by consensus (majority ACCEPT). One REJECT among three 
 slice bounces it. The parallel script below and the sequential fallback both consume the SAME
 `planTick` output, so they cannot disagree on what runs or how hard it is verified.
 
+Each slice also carries `touched`: true when its watched paths changed since the partition stamp
+(and true for every slice when the stamp is missing). On a large repo a driver MAY skip a slice
+with `touched: false` to keep the tick scoped to what moved, but `planTick` still lists every
+slice, so the skip is explicit, never silent. Exception: always run `seamFirst` slices when any
+sibling runs. A seam touches shared contracts, so a change elsewhere this tick can invalidate an
+untouched seam; for seams, `touched` is advisory and the seam runs to bound the blast radius.
+
 ## The bounded deletion pass (a verifier lever)
 
 A verifier may run one deletion pass over its slice. It is complexity-only and never touches

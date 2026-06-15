@@ -10,5 +10,15 @@
     "types": ["bun"],
     "allowImportingTsExtensions": true
   },
-  "include": ["vader.ts", "vader.test.ts", "dogfood.test.ts"]
+  "include": [
+    "core.ts",
+    "git.ts",
+    "model.ts",
+    "gate.ts",
+    "memory.ts",
+    "plan.ts",
+    "vader.ts",
+    "vader.test.ts",
+    "dogfood.test.ts"
+  ]
 }
