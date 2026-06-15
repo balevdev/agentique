@@ -716,6 +716,47 @@ test('AC4: recall preserves a multi-word bounce reason in topBounces', async () 
   expect(packet.topBounces[0]!.class).toBe('logic')
 })
 
+test('AC4: topBounces keeps class+reason pairs distinct that would collide under a space-joined key', async () => {
+  const { root } = gitRepo()
+  cmdInit(root)
+  // 'a' + 'b c' and 'a b' + 'c' both flatten to "a b c" under a space-joined key; the tuple key
+  // must keep them as two separate bounce buckets.
+  cmdPersist(
+    root,
+    report({
+      run: { id: 'R1', gate: 'residual' },
+      slices: [
+        { id: 'S1', class: 'a', owner: 'o', verdict: 'bounce', bounces: [{ ac: 'AC1', reason: 'b c' }] },
+        { id: 'S2', class: 'a b', owner: 'o', verdict: 'bounce', bounces: [{ ac: 'AC2', reason: 'c' }] },
+      ],
+    }),
+  )
+  const packet = await cmdRecall(root)
+  expect(packet.topBounces.length).toBe(2)
+  expect(packet.topBounces.every((b) => b.count === 1)).toBe(true)
+  expect(new Set(packet.topBounces.map((b) => b.class))).toEqual(new Set(['a', 'a b']))
+})
+
+test('AC4: recall flags only the partition slices whose watched paths changed since the stamp', async () => {
+  const { root, c0 } = gitRepo()
+  cmdInit(root)
+  patchState(root, (s) => {
+    s.partition = {
+      commit: c0,
+      slices: [
+        { id: 'P1', class: 'logic', paths: ['src/p'] },
+        { id: 'P2', class: 'logic', paths: ['src/q'] },
+      ],
+    }
+  })
+  commit(root, 'src/p/x.ts', 'export const x = 1\n', 'touch P1 only')
+  const packet = await cmdRecall(root)
+  expect(packet.partition.stale).toBe(true)
+  expect(packet.partition.reason).toBe('watch-touched')
+  expect(packet.partition.staleSlices.map((s) => s.id)).toEqual(['P1'])
+  expect(packet.partition.staleSlices[0]!.changed).toContain('src/p/x.ts')
+})
+
 test('AC4: staleness matches on a path boundary, not a string prefix', async () => {
   const { root, c0 } = gitRepo()
   cmdInit(root)
@@ -753,7 +794,7 @@ function recallStub(over: Partial<RecallPacket>): RecallPacket {
     nextItem: null,
     pendingModelChange: null,
     grounding: { commit: null, stale: false, reason: null, changed: [] },
-    partition: { commit: null, stale: false, reason: null, slices: over.partition?.slices ?? [], staleSlices: [] },
+    partition: over.partition ?? { commit: null, stale: false, reason: null, slices: [], staleSlices: [] },
     openRisks: [],
     mustTriage: [],
     pendingTriage: [],
@@ -773,7 +814,7 @@ test('planTick routes a seam slice to seamFirst with the full voter panel', () =
       ratchet: [{ class: 'seam', level: 0, eligible: 0, consecutiveClean: 0, neverRatchet: true }],
     }),
   )
-  expect(plan.seamFirst).toEqual([{ id: 'S0', class: 'seam', voters: 3, reason: 'seam' }])
+  expect(plan.seamFirst).toEqual([{ id: 'S0', class: 'seam', voters: 3, reason: 'seam', touched: false }])
   expect(plan.siblings).toEqual([])
 })
 
@@ -797,10 +838,50 @@ test('planTick scales voters for never-ratchet and previously-bounced classes, e
   )
   expect(plan.seamFirst).toEqual([])
   expect(plan.siblings).toEqual([
-    { id: 'S1', class: 'security', voters: 3, reason: 'never-ratchet' },
-    { id: 'S2', class: 'logic', voters: 3, reason: 'top-bounce' },
-    { id: 'S3', class: 'plumbing', voters: 1, reason: 'default' },
+    { id: 'S1', class: 'security', voters: 3, reason: 'never-ratchet', touched: false },
+    { id: 'S2', class: 'logic', voters: 3, reason: 'top-bounce', touched: false },
+    { id: 'S3', class: 'plumbing', voters: 1, reason: 'default', touched: false },
   ])
+})
+
+test('planTick marks only the stale partition slices touched and never drops an untouched one', () => {
+  const plan = planTick(
+    recallStub({
+      partition: {
+        commit: 'c0',
+        stale: true,
+        reason: 'watch-touched',
+        slices: [
+          { id: 'S1', class: 'logic', paths: ['a'] },
+          { id: 'S2', class: 'logic', paths: ['b'] },
+        ],
+        staleSlices: [{ id: 'S2', changed: ['b/x.ts'] }],
+      },
+    }),
+  )
+  // both slices are still planned (never dropped); only the changed one is touched.
+  expect(plan.siblings).toEqual([
+    { id: 'S1', class: 'logic', voters: 1, reason: 'default', touched: false },
+    { id: 'S2', class: 'logic', voters: 1, reason: 'default', touched: true },
+  ])
+})
+
+test('planTick treats every slice as touched when the partition has no usable stamp', () => {
+  for (const reason of ['no-stamp', 'missing-commit'] as const) {
+    const plan = planTick(
+      recallStub({
+        partition: {
+          commit: reason === 'no-stamp' ? null : 'gone',
+          stale: true,
+          reason,
+          slices: [{ id: 'S1', class: 'logic', paths: ['a'] }],
+          staleSlices: [],
+        },
+      }),
+    )
+    // cannot compute per-slice staleness, so verify all rather than skip any.
+    expect(plan.siblings[0]!.touched).toBe(true)
+  }
 })
 
 // ---------- AC1-AC7: CLI binary smoke ----------

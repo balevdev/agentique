@@ -31,7 +31,7 @@ import {
   type RunLine,
 } from './core.ts'
 import { readModel } from './model.ts'
-import { staleness, changedSince, underWatch } from './git.ts'
+import { staleness, changedSince, underWatch, commitExists } from './git.ts'
 
 // ---------- run report (single persist input, build + review) ----------
 
@@ -447,22 +447,32 @@ export async function cmdRecall(root: string): Promise<RecallPacket> {
     // model may be absent before P0; recall still works so the loop can bootstrap.
   }
 
-  const partitionBase = staleness(root, state.partition.commit, [])
+  // Partition staleness, computing changedSince exactly once and reusing it per slice (a large
+  // repo's diff is not free). commit === null is 'no-stamp'; a vanished commit is 'missing-commit';
+  // otherwise a slice is stale when one of its watched paths shows up in the diff.
   const staleSlices: { id: string; changed: string[] }[] = []
-  if (state.partition.commit !== null && partitionBase.reason !== 'missing-commit') {
+  let partitionReason: Staleness['reason'] = null
+  if (state.partition.commit === null) {
+    partitionReason = 'no-stamp'
+  } else if (!commitExists(root, state.partition.commit)) {
+    partitionReason = 'missing-commit'
+  } else {
     const changed = changedSince(root, state.partition.commit)
     for (const slice of state.partition.slices) {
       const hits = changed.filter((f) => underWatch(f, slice.paths))
       if (hits.length > 0) staleSlices.push({ id: slice.id, changed: hits })
     }
+    if (staleSlices.length > 0) partitionReason = 'watch-touched'
   }
-  const partitionStale = partitionBase.reason === 'no-stamp' || partitionBase.reason === 'missing-commit' || staleSlices.length > 0
+  const partitionStale = partitionReason !== null
 
-  // key carries class+reason so a multi-word reason survives intact (no decode-by-split).
+  // Key on the structured [class, reason] pair so a multi-word reason survives intact AND two
+  // pairs that would flatten to the same space-joined string ('a'+'b c' vs 'a b'+'c') stay
+  // distinct buckets.
   const bounceCounts = new Map<string, { class: string; reason: string; count: number }>()
   for (const line of ledger) {
     if (line.type !== 'bounce') continue
-    const key = `${line.class} ${line.reason}`
+    const key = JSON.stringify([line.class, line.reason])
     const prev = bounceCounts.get(key)
     if (prev === undefined) bounceCounts.set(key, { class: line.class, reason: line.reason, count: 1 })
     else prev.count++
@@ -485,7 +495,7 @@ export async function cmdRecall(root: string): Promise<RecallPacket> {
     partition: {
       commit: state.partition.commit,
       stale: partitionStale,
-      reason: partitionStale ? (staleSlices.length > 0 ? 'watch-touched' : partitionBase.reason) : null,
+      reason: partitionReason,
       slices: state.partition.slices,
       staleSlices,
     },

@@ -37,6 +37,15 @@ sibling) and `siblings` (run in parallel), and stamps each slice with a `voters`
 computed once in the spine, the Claude Workflow path, the Pi extension, and the sequential
 fallback cannot drift in WHAT they run; they differ only in HOW they execute it.
 
+Scoping by blast radius (large repos). Each slice also carries `touched: boolean`, derived from
+`recall.partition.staleSlices`: true when the slice's watched paths changed since the partition
+stamp, and true for every slice when the stamp is missing or its commit is gone (verify all
+rather than skip any). An adapter MAY skip a slice with `touched: false` to keep a tick scoped to
+what actually moved, but the plan always lists every slice, so the skip is explicit and auditable,
+never a silent drop. One rule overrides this: a `seamFirst` slice runs whenever any sibling runs.
+A seam touches shared contracts, so an untouched seam can still be invalidated by a change
+elsewhere this tick; treat `touched` as advisory for seams and run them to bound the blast radius.
+
 Where a harness has no fan-out primitive, the adapter falls back to sequential: same
 `planTick` output, owners one at a time, parallel siblings simply run in series (a high-risk
 slice still earns its full `voters` panel as sequential passes). The report and the gate are

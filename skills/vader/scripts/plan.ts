@@ -8,7 +8,10 @@ import type { RecallPacket } from './memory.ts'
 // Why a slice gets more than one independent verifier. Carried so an adapter can show the
 // operator the reason, and so the plan stays auditable rather than a bare number.
 export type VoterReason = 'seam' | 'never-ratchet' | 'top-bounce' | 'default'
-export type TickSlice = { id: string; class: string; voters: number; reason: VoterReason }
+// `touched` says whether this slice's watched paths changed since the partition stamp. The plan
+// always carries EVERY slice (it never silently drops one); an adapter reads `touched` to skip
+// unchanged slices when it wants to, with the full set still auditable.
+export type TickSlice = { id: string; class: string; voters: number; reason: VoterReason; touched: boolean }
 
 // The deterministic shape of one tick: seam slices run first and alone (they touch shared
 // contracts, so a sibling must not race them), then the remaining slices run as parallel
@@ -33,11 +36,17 @@ function votersFor(cls: string, neverRatchet: Set<string>, bounced: Set<string>)
 export function planTick(recall: RecallPacket): TickPlan {
   const neverRatchet = new Set(recall.ratchet.filter((r) => r.neverRatchet).map((r) => r.class))
   const bounced = new Set(recall.topBounces.map((b) => b.class))
+  // When the stamp is missing or its commit is gone we cannot compute per-slice staleness, so
+  // every slice is treated as touched (verify all rather than skip any). Otherwise only the
+  // slices whose watched paths actually changed are touched.
+  const allTouched = recall.partition.reason === 'no-stamp' || recall.partition.reason === 'missing-commit'
+  const staleIds = new Set(recall.partition.staleSlices.map((s) => s.id))
   const seamFirst: TickSlice[] = []
   const siblings: TickSlice[] = []
   for (const slice of recall.partition.slices) {
     const { voters, reason } = votersFor(slice.class, neverRatchet, bounced)
-    const tick: TickSlice = { id: slice.id, class: slice.class, voters, reason }
+    const touched = allTouched || staleIds.has(slice.id)
+    const tick: TickSlice = { id: slice.id, class: slice.class, voters, reason, touched }
     if (slice.class === 'seam') seamFirst.push(tick)
     else siblings.push(tick)
   }

@@ -88,6 +88,17 @@ settle it first, then move code behind it incrementally, suite green after each 
 - **Proof.** `bun test` (all 49) and `bunx tsc --noEmit` green after each of C1..C5. `tsconfig`
   `include` updated to the new files. CLI smoke tests (vader.test.ts 701-741) green.
 
+- **RESULT.** Shipped as 7 deep modules rather than the C1..C5 file list above, after the
+  AskUserQuestion choice to split by cohesion not ceremony (no `validate.ts`/`report.ts`/
+  `init.ts`/`gen.ts` shallow files): `core.ts` (error + primitives + layout + state IO, 313),
+  `git.ts` (39), `model.ts` (constitution + gen + hashes, 298), `gate.ts` (detection + parallel
+  checks + shape-batch + cmdGate, 210), `memory.ts` (report + triage + ratchet + persist +
+  recall, 504), `plan.ts` (planTick, 45), `vader.ts` (cli + barrel, 184). The planned acyclic
+  graph held with one correction: the `cmdGen`-writes-state vs `cmdRecall`-reads-model cycle is
+  broken by keeping state persistence in `core.ts` (the leaf), not in `memory.ts`. `core.ts`
+  imports nothing from vader. Barrel re-exports every module so the `./vader.ts` import surface is
+  byte-identical. All 55 tests + tsc green; pure code movement, no behaviour change.
+
 ## Batch D: scale rot (annotate, dedup, de-collide)
 
 Findings sections 3.1, 3.2, 3.3. Runs on the split modules.
@@ -109,6 +120,17 @@ Findings sections 3.1, 3.2, 3.3. Runs on the split modules.
   grounding path and a stale partition slice still reports both correctly after the dedup. A
   `topBounces` test with two distinct class/reason pairs that previously collided now counts them
   separately. Full suite green.
+
+- **RESULT.** Shipped as planned. `TickSlice` gains `touched: boolean`; `planTick` derives it
+  from `recall.partition.staleSlices` (and marks every slice touched when the stamp is missing or
+  its commit is gone, so an unverifiable partition fails safe to verify-all), still returning
+  every slice. `cmdRecall` now computes `changedSince` exactly once for the partition (the old
+  empty-watch `staleness` probe plus a second `changedSince` are gone) and sets `reason` directly.
+  `topBounces` keys on `JSON.stringify([class, reason])`, so `'a'`+`'b c'` and `'a b'`+`'c'` no
+  longer collide. `recipes.md` and `adapters.md` carry the seam-blast-radius scoping rule:
+  `touched` is an advisory skip for siblings, but a `seamFirst` slice always runs when any sibling
+  runs. `planTick` stays pure. 4 new tests (2 planTick touched, 1 topBounces de-collision, 1
+  per-slice partition staleness); all 59 tests + tsc green.
 
 ## Out of scope (named in findings, deliberately not touched)
 
