@@ -5,7 +5,7 @@
 // because integrity is a model concern.
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync, readdirSync, statSync } from 'node:fs'
-import { join, relative } from 'node:path'
+import { join, relative, sep } from 'node:path'
 import { createHash } from 'node:crypto'
 import { VaderError, paths, loadState, saveState } from './core.ts'
 
@@ -123,7 +123,10 @@ export function enforcementHash(root: string): string {
   const p = paths(root)
   const parts: string[] = []
   for (const f of listFilesSorted(join(p.generated, 'checks'))) {
-    parts.push(relative(root, f) + '\0' + readFileSync(f, 'utf8'))
+    // Hash the POSIX-normalized relative path so the lock is identical whether gen ran on a
+    // '/'-separator host or a '\\'-separator one. relative() yields native separators; left raw,
+    // the same checkout would lock to different hashes on macOS vs Windows.
+    parts.push(relative(root, f).split(sep).join('/') + '\0' + readFileSync(f, 'utf8'))
   }
   parts.push('gate.json\0' + (existsSync(p.gate) ? readFileSync(p.gate, 'utf8') : ''))
   return hashModel(parts.join('\0\0'))

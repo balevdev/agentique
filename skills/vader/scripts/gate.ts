@@ -179,9 +179,10 @@ export async function cmdGate(root: string): Promise<GateResult> {
   const others = model.invariants.filter((inv) => !('distinct' in inv.check))
   // Leave the parent thread and a core headroom; never drop below one worker.
   const limit = Math.max(1, (cpus().length || 3) - 2)
+  const fallowCheck = gateCfg.fallowCheck
   const [repo, fallow, shapeResults, otherResults] = await Promise.all([
     runCheck(root, gateCfg.repoCheck),
-    gateCfg.fallowCheck ? runCheck(root, gateCfg.fallowCheck) : Promise.resolve(null),
+    fallowCheck ? runCheck(root, fallowCheck) : Promise.resolve(null),
     runShapeBatch(p, root, shapes),
     pool(others, limit, async (inv) => {
       const cmd = invariantCmd(p, root, inv)
@@ -204,7 +205,7 @@ export async function cmdGate(root: string): Promise<GateResult> {
     modelHashLocked,
     enforcementLocked,
     repoCheck: { cmd: gateCfg.repoCheck.join(' '), pass: repo.pass },
-    fallow: fallow ? { cmd: gateCfg.fallowCheck!.join(' '), pass: fallow.pass } : null,
+    fallow: fallow && fallowCheck ? { cmd: fallowCheck.join(' '), pass: fallow.pass } : null,
     invariants,
   }
 }
