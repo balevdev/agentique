@@ -99,7 +99,7 @@ export default function vaderExtension(pi: ExtensionAPI) {
 			"2. Compute the tick plan with `planTick(recall)` (exported from the vader engine). Run `seamFirst` slices sequentially FIRST (they touch shared seams), then run `siblings` as parallel Pi subagents up to the max concurrency.",
 			"3. Honor each slice's `voters`: spawn that many INDEPENDENT verifier subagents (a verifier never wrote the slice) and require them to refute each acceptance criterion against the real diff before accepting. A seam, never-ratchet, or previously-bounced class gets the full panel; do not collapse it.",
 			"4. Keep one writer per artifact and no overlapping write paths. Use isolated worktrees only when slices share paths.",
-			"5. Gate in the parent session with `vader gate --root .`. It fails closed on a model-hash mismatch and on any configured-but-failing check. Route every regression back to its slice owner.",
+			"5. Gate in the parent session with `vader gate --root .`. It fails closed on a model-hash mismatch, on a tampered generated check or gate.json (enforcementLocked false), and on any configured-but-failing check. Route every regression back to its slice owner.",
 			"6. Persist with `vader persist <run-report.json> --root .`. The engine writes state first and appends the LEDGER run-line LAST as the commit marker, so a crash is always safe to re-run. A run may PROPOSE a model change; it never applies one.",
 			"",
 			"Stop and ask before changing product scope, a shared seam, or any constitution invariant not already approved.",

@@ -329,6 +329,80 @@ test('AC8: cmdGate fails closed when the model hash is unlocked', async () => {
   expect(res.pass).toBe(false)
 })
 
+// ---------- AC-lock: the enforcement surface (generated checks + gate.json) ----------
+
+test('AC-lock: tampering a generated check fails the gate even with the model hash locked', async () => {
+  const root = tmpRepo()
+  cmdInit(root)
+  writeFileSync(paths(root).gate, JSON.stringify({ repoCheck: ['true'] }))
+  writeFileSync(
+    paths(root).modelJson,
+    JSON.stringify({
+      concepts: {},
+      invariants: [
+        { id: 'INV-dep', kind: 'dependency', statement: 'a !-> b', check: { forbidImport: { from: 'a/**', to: 'b/**' } } },
+      ],
+    }),
+  )
+  await cmdGen(root)
+  expect((await cmdGate(root)).pass).toBe(true)
+  // an agent neuters the COMPILED check without touching the protected model
+  writeFileSync(join(paths(root).generated, 'checks', 'dep-INV-dep.ts'), '#!/usr/bin/env bun\nprocess.exit(0)\n')
+  const res = await cmdGate(root)
+  expect(res.modelHashLocked).toBe(true)
+  expect(res.enforcementLocked).toBe(false)
+  expect(res.pass).toBe(false)
+})
+
+test('AC-lock: silencing repoCheck via gate.json after gen fails closed', async () => {
+  const root = tmpRepo()
+  cmdInit(root)
+  writeFileSync(paths(root).gate, JSON.stringify({ repoCheck: ['false'] }))
+  writeFileSync(paths(root).modelJson, JSON.stringify({ concepts: {}, invariants: [] }))
+  await cmdGen(root)
+  // an agent rewrites the repo check to a no-op to silence the gate after the lock engaged
+  writeFileSync(paths(root).gate, JSON.stringify({ repoCheck: ['true'] }))
+  const res = await cmdGate(root)
+  expect(res.enforcementLocked).toBe(false)
+  expect(res.pass).toBe(false)
+})
+
+test('AC-lock: gen then gate is green with enforcementLocked true', async () => {
+  const root = tmpRepo()
+  cmdInit(root)
+  writeFileSync(paths(root).gate, JSON.stringify({ repoCheck: ['true'] }))
+  writeFileSync(paths(root).modelJson, JSON.stringify({ concepts: {}, invariants: [] }))
+  await cmdGen(root)
+  const res = await cmdGate(root)
+  expect(res.enforcementLocked).toBe(true)
+  expect(res.pass).toBe(true)
+})
+
+test('AC-lock: a never-genned repo treats the enforcement lock as not engaged (legacy/null path)', async () => {
+  const root = tmpRepo()
+  cmdInit(root)
+  writeFileSync(paths(root).gate, JSON.stringify({ repoCheck: ['true'] }))
+  writeFileSync(paths(root).modelJson, JSON.stringify({ concepts: {}, invariants: [] }))
+  // no cmdGen: enforcementHash stays null, so the lock must not block a fresh repo
+  const res = await cmdGate(root)
+  expect(res.enforcementLocked).toBe(true)
+  expect(res.pass).toBe(true)
+})
+
+test('AC-lock: re-gen after a gate.json change re-locks the enforcement surface', async () => {
+  const root = tmpRepo()
+  cmdInit(root)
+  writeFileSync(paths(root).gate, JSON.stringify({ repoCheck: ['false'] }))
+  writeFileSync(paths(root).modelJson, JSON.stringify({ concepts: {}, invariants: [] }))
+  await cmdGen(root)
+  writeFileSync(paths(root).gate, JSON.stringify({ repoCheck: ['true'] }))
+  expect((await cmdGate(root)).enforcementLocked).toBe(false)
+  await cmdGen(root) // operator re-gens after deliberately editing the verdict config
+  const res = await cmdGate(root)
+  expect(res.enforcementLocked).toBe(true)
+  expect(res.pass).toBe(true)
+})
+
 // ---------- validateReport ----------
 
 test('validateReport names the exact missing path', () => {

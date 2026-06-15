@@ -21,6 +21,8 @@ import {
   appendFileSync,
   renameSync,
   rmSync,
+  readdirSync,
+  statSync,
 } from 'node:fs'
 import { join, relative } from 'node:path'
 import { execFileSync } from 'node:child_process'
@@ -128,6 +130,11 @@ export type ModelChange = { proposedBy: string; reason: string; diff: string }
 export type State = {
   version: 1
   modelHash: string | null
+  // Locks the compiled enforcement surface (generated/checks + gate.json), not just the model
+  // text. The model hash proves the model is unchanged; this proves the checks the model
+  // compiled to, and the repo-check command the gate runs, are unchanged too. null until the
+  // first `gen` engages it, the same way modelHash is null before the model is frozen.
+  enforcementHash: string | null
   roadmap: RoadmapItem[]
   pendingModelChange: ModelChange | null
   grounding: { commit: string | null; watch: string[] }
@@ -221,6 +228,7 @@ function defaultState(): State {
   return {
     version: 1,
     modelHash: null,
+    enforcementHash: null,
     roadmap: [],
     pendingModelChange: null,
     grounding: { commit: null, watch: [] },
@@ -271,6 +279,32 @@ export async function readModel(root: string): Promise<{ model: Constitution; ra
     return { model: validateConstitution(mod.constitution), raw }
   }
   throw new VaderError(`no constitution model at ${p.modelJson} or ${p.modelTs}`)
+}
+
+// Hashes the compiled enforcement surface: every file under generated/checks (sorted by path,
+// content included) plus gate.json. `gen` locks this; `gate` recomputes it from disk and fails
+// closed on any drift. This is what makes "an agent cannot edit generated/ or gate.json to
+// silence a check" a mechanical guarantee rather than a prose promise. Deterministic across
+// hosts: the file list is sorted and the relative path travels in the hashed text.
+function listFilesSorted(dir: string): string[] {
+  if (!existsSync(dir)) return []
+  const out: string[] = []
+  for (const entry of readdirSync(dir)) {
+    const full = join(dir, entry)
+    if (statSync(full).isDirectory()) out.push(...listFilesSorted(full))
+    else out.push(full)
+  }
+  return out.sort()
+}
+
+export function enforcementHash(root: string): string {
+  const p = paths(root)
+  const parts: string[] = []
+  for (const f of listFilesSorted(join(p.generated, 'checks'))) {
+    parts.push(relative(root, f) + '\0' + readFileSync(f, 'utf8'))
+  }
+  parts.push('gate.json\0' + (existsSync(p.gate) ? readFileSync(p.gate, 'utf8') : ''))
+  return hashModel(parts.join('\0\0'))
 }
 
 // ---------- git ----------
@@ -569,6 +603,9 @@ export async function cmdGen(root: string): Promise<{ written: string[]; modelHa
   const state = loadState(root)
   const modelHash = hashModel(raw)
   state.modelHash = modelHash
+  // Lock the compiled surface too (generated checks + the gate.json read at gate time), now that
+  // the files are written. From here a hand-edit of either fails the gate closed.
+  state.enforcementHash = enforcementHash(root)
   saveState(root, state)
   return { written, modelHash }
 }
@@ -578,6 +615,7 @@ export async function cmdGen(root: string): Promise<{ written: string[]; modelHa
 export type GateResult = {
   pass: boolean
   modelHashLocked: boolean
+  enforcementLocked: boolean
   repoCheck: { cmd: string; pass: boolean } | null
   fallow: { cmd: string; pass: boolean } | null
   invariants: { id: string; pass: boolean; detail: string }[]
@@ -602,6 +640,9 @@ export async function cmdGate(root: string): Promise<GateResult> {
   const state = loadState(root)
   const { model, raw } = await readModel(root)
   const modelHashLocked = state.modelHash === null || state.modelHash === hashModel(raw)
+  // null means the lock never engaged (no gen yet / legacy state): do not block. Once engaged,
+  // any drift in generated/checks or gate.json flips this false and the gate fails closed.
+  const enforcementLocked = state.enforcementHash === null || state.enforcementHash === enforcementHash(root)
   const gateCfg = validateGateConfig(JSON.parse(readFileSync(p.gate, 'utf8')), 'gate.json')
   const repo = runCheck(root, gateCfg.repoCheck)
   const fallow = gateCfg.fallowCheck ? runCheck(root, gateCfg.fallowCheck) : null
@@ -627,10 +668,12 @@ export async function cmdGate(root: string): Promise<GateResult> {
     else r = { pass: false, detail: 'unknown check kind' }
     invariants.push({ id: inv.id, pass: r.pass, detail: r.detail })
   }
-  const pass = modelHashLocked && repo.pass && (fallow?.pass ?? true) && invariants.every((i) => i.pass)
+  const pass =
+    modelHashLocked && enforcementLocked && repo.pass && (fallow?.pass ?? true) && invariants.every((i) => i.pass)
   return {
     pass,
     modelHashLocked,
+    enforcementLocked,
     repoCheck: { cmd: gateCfg.repoCheck.join(' '), pass: repo.pass },
     fallow: fallow ? { cmd: gateCfg.fallowCheck!.join(' '), pass: fallow.pass } : null,
     invariants,
@@ -839,6 +882,8 @@ function validateState(input: unknown): State {
   return {
     version: 1,
     modelHash: nullableStr(s.modelHash, 'state.modelHash'),
+    // a state.json written before this field existed has no enforcementHash: treat as not-yet-locked.
+    enforcementHash: s.enforcementHash === undefined ? null : nullableStr(s.enforcementHash, 'state.enforcementHash'),
     roadmap: arr(s.roadmap, 'state.roadmap').map((x, i) => {
       const r = obj(x, `state.roadmap[${i}]`)
       return {

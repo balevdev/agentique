@@ -85,7 +85,8 @@ Prove the work before persisting it.
 - `vader gate --root <repo>` is the deterministic arbiter underneath the verifiers: repo check
   plus fallow (when configured) plus every generated check, returning `pass` and a per-invariant
   pass/fail list. A failed invariant id is an automatic bounce, no discussion. The gate fails
-  closed if `modelHashLocked` is false (someone touched the protected model).
+  closed if `modelHashLocked` is false (someone touched the protected model) or
+  `enforcementLocked` is false (someone touched a generated check or `gate.json`).
 - A REJECT or a failed id is a slice `bounce`: the verifier records `{ac, reason}`, the slice
   returns to its owner, and the bounce is carried into the run report so the ledger remembers
   it.

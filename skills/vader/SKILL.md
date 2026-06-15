@@ -48,11 +48,15 @@ and produces the identical report and gate verdict.
 ## Anti-decay lock
 
 The model is a protected artifact. Implementer agents can make code FAIL the gate but cannot
-edit `constitution.model.*` or `generated/` to silence a failure. `vader gen` records the
-compiled model hash in `state.json` (the lock engages when the model is frozen and compiled at
-P1, and re-freezes after an approved model change recompiles); if the on-disk model no longer
-matches the locked hash, `vader gate` fails closed. The only way to change what is enforced is a
-human-gated model-change proposal.
+edit `constitution.model.*`, `generated/`, or `gate.json` to silence a failure. `vader gen`
+records two hashes in `state.json`: the compiled model hash, and an enforcement hash over the
+compiled surface (every file in `generated/checks/` plus `gate.json`, the command the gate
+actually runs). The lock engages when the model is frozen and compiled at P1, and re-freezes
+after an approved model change recompiles. If the on-disk model no longer matches its hash, or
+any generated check or `gate.json` no longer matches the enforcement hash, `vader gate` fails
+closed. Editing the model is a human-gated model-change proposal; editing a generated check or
+the verdict config requires a re-`gen`, which is the operator deliberately re-locking the surface
+(not a silent agent edit). Neither can be silenced by an implementer.
 
 ## Memory that prevents context rot
 
@@ -93,8 +97,8 @@ Run the bundled zero-dep bun CLI at `scripts/vader.ts` with `--root <repo>`:
 - `vader gen` compiles `constitution.model` into `.vader/generated/checks/` and locks the
   compiled model hash in `state.json`.
 - `vader gate` runs the repo check, fallow when configured, and every generated check, and
-  prints structured JSON: `pass`, `modelHashLocked`, `repoCheck`, `fallow`, and a per-invariant
-  pass/fail list.
+  prints structured JSON: `pass`, `modelHashLocked`, `enforcementLocked`, `repoCheck`, `fallow`,
+  and a per-invariant pass/fail list.
 - `vader recall` prints the verify-before-trust rehydration packet (next item, stale layers,
   open risks, `topBounces`, ratchet, parked model change, last run).
 - `vader triage <risk-id> <finding|defer|close> --reason <text>` records a risk disposition;
