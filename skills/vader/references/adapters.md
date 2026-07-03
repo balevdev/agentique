@@ -65,10 +65,12 @@ The `/vader` command is the adapter. It reads `references/protocol.md` and runs 
 - Recall: `vader recall --root <repo>` feeds `topBounces`, `ratchet`, stamps, and the next
   item into the script `args`.
 - Fan out: the Workflow script spawns the critic, the seam owner alone, the sibling owners in
-  parallel (each `isolation: 'worktree'`), then the cross-assigned verifiers whose voter count
-  scales with `topBounces`.
-- Gate: `vader gate --root <repo>` is the deterministic arbiter; a failed invariant id is an
-  automatic bounce.
+  parallel (each `isolation: 'worktree'`, each handed its reverse-dependency set so it does not
+  break an importer it cannot see), then runs the deterministic gate on the merged tree, and only
+  on a green gate spawns the cross-assigned verifiers whose voter count scales with `topBounces`.
+- Gate: `vader gate --root <repo>` is the deterministic arbiter and runs BEFORE the verifier
+  panel; a failed invariant id is an automatic bounce, and a red static gate spawns zero verifiers
+  (never pay for an LLM panel behind a failing free check).
 - Persist: the assembled `RunReport` goes to `vader persist --root <repo>`. A model change
   parks for the human gate; a green build tick marks the item done.
 
@@ -77,9 +79,10 @@ model, or change the model) or an exhausted roadmap.
 
 ## Writing a new adapter
 
-Port the four CLI calls verbatim, then bind the harness fan-out primitive to the four phases in
-`references/recipes.md` (critic, seam, owners, verify). If the host has no parallelism, bind
-the sequential fallback. Do not add a second gate, a second ledger, or a second persist path:
+Port the four CLI calls verbatim, then bind the harness fan-out primitive to the phases in
+`references/recipes.md` (critic, seam, owners, gate, verify) in that order: the deterministic gate
+runs on the merged tree before any verifier, so no LLM panel is spent behind a red static gate. If
+the host has no parallelism, bind the sequential fallback. Do not add a second gate, a second ledger, or a second persist path:
 one pattern per concern. The adapter is finished when a tick driven through it produces the
 same `RunReport` and the same `vader gate` verdict as the Claude Code adapter on the same
 input.

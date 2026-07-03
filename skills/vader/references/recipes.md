@@ -87,16 +87,21 @@ export const meta = {
     { title: 'Critic' },
     { title: 'Seam' },
     { title: 'Owners' },
+    { title: 'Gate' },
     { title: 'Verify' },
   ],
 }
 
 // `plan` is `planTick(recall)`, computed once by the driver. It is the single source of truth
 // for ordering and voter count; the script never re-derives risk. `votersById` lets the verify
-// phase look up each slice's panel size by id.
-const { slices, baseSha, plan, mantra, gatePrompt } = args
+// phase look up each slice's panel size by id. `reverseDeps` maps a slice id to the ids of the
+// slices/modules that IMPORT it, sourced from the P-1 repomap so an owner is not starved of the
+// integration context the H4 guardrail warns about. `runVaderGate` runs the deterministic gate on
+// the merged tree; both are repo-local, supplied by the driver.
+const { slices, baseSha, plan, mantra, gatePrompt, reverseDeps, runVaderGate, root } = args
 const votersById = new Map([...plan.seamFirst, ...plan.siblings].map((t) => [t.id, t.voters]))
 const voters = (s) => votersById.get(s.id) ?? 1
+const reverseDepsOf = (s) => reverseDeps?.[s.id] ?? []
 
 // Critic red-teams the plan before any code is written.
 phase('Critic')
@@ -112,7 +117,7 @@ phase('Seam')
 const byId = new Map(slices.map((s) => [s.id, s]))
 for (const t of plan.seamFirst) {
   const s = byId.get(t.id)
-  await agent(ownerPrompt(s, baseSha, mantra), { label: `owner:${s.id}`, phase: 'Seam', isolation: 'worktree' })
+  await agent(ownerPrompt(s, baseSha, mantra, reverseDepsOf(s)), { label: `owner:${s.id}`, phase: 'Seam', isolation: 'worktree' })
 }
 
 // Sibling owners build in parallel, each isolated off the base sha.
@@ -120,23 +125,44 @@ phase('Owners')
 const siblings = plan.siblings.map((t) => byId.get(t.id))
 await parallel(
   siblings.map((s) => () =>
-    agent(ownerPrompt(s, baseSha, mantra), { label: `owner:${s.id}`, phase: 'Owners', isolation: 'worktree' }),
+    agent(ownerPrompt(s, baseSha, mantra, reverseDepsOf(s)), { label: `owner:${s.id}`, phase: 'Owners', isolation: 'worktree' }),
   ),
 )
 
-// Cross-assigned refute-first verifiers run the acceptance gate, voter count by evidence.
+// Deterministic gate FIRST, on the MERGED tree, before a single token is spent on an LLM panel.
+// The driver merges each owner worktree into root, then runs the free static gate. This is the
+// opposite of the old order (panel then gate) and the single biggest token win: a slice behind a
+// failing static gate must show ZERO verifier agents spawned.
+phase('Gate')
+const gate = await runVaderGate(root)
+if (!gate.pass) {
+  // The cheap static gate already bounced the tick; the failing invariants (keyed by id) go back
+  // to their owners. No verifier is spawned behind a red gate, ever.
+  return { blocked: 'gate', gate }
+}
+
+// Only now, on a green merged tree, do cross-assigned refute-first verifiers run. Panel size comes
+// from planTick: 1 for an ordinary slice, 3 for seam / never-ratchet / bounced (the classes that
+// can never earn reduced scrutiny). A lone verifier that REJECTs escalates to a full panel, so one
+// noisy sample cannot bounce good work while unanimous ACCEPT never pays for a standing panel.
 phase('Verify')
-const verdicts = await parallel(
-  slices.flatMap((s) =>
-    Array.from({ length: voters(s) }, (_, i) => () =>
-      agent(`${gatePrompt}\n\nCONTRACT and DIFF for slice ${s.id}. You did not write it. Voter ${i + 1}.`, {
-        label: `verify:${s.id}:${i + 1}`,
-        phase: 'Verify',
-        schema: VERDICT_SCHEMA,
-      }).then((v) => ({ slice: s.id, class: s.class, ...v })),
-    ),
-  ),
-)
+const voteRound = (s, n, from) =>
+  Array.from({ length: n }, (_, i) => () =>
+    agent(`${gatePrompt}\n\nCONTRACT and DIFF for slice ${s.id}. You did not write it. Voter ${from + i + 1}.`, {
+      label: `verify:${s.id}:${from + i + 1}`,
+      phase: 'Verify',
+      schema: VERDICT_SCHEMA,
+    }).then((v) => ({ slice: s.id, class: s.class, ...v })),
+  )
+async function verifySlice(s) {
+  let votes = (await parallel(voteRound(s, voters(s), 0))).filter(Boolean)
+  // escalate a lone REJECT (planTick asked for 1) into a 3-voter panel and re-decide by majority
+  if (voters(s) === 1 && votes[0]?.verdict === 'REJECT') {
+    votes = votes.concat((await parallel(voteRound(s, 2, 1))).filter(Boolean))
+  }
+  return votes
+}
+const verdicts = (await parallel(slices.map((s) => () => verifySlice(s)))).flat()
 
 // Consensus: a slice passes only if the majority of its voters ACCEPT.
 const bySlice = new Map()
@@ -154,10 +180,13 @@ const sliceResults = [...bySlice.entries()].map(([id, vs]) => {
 return { sliceResults }
 ```
 
-`ownerPrompt(slice, baseSha, mantra)` embeds the MANTRA, the frozen contract for that slice,
-the `slicePaths` boundary, and the worktree base sha. `CRITIQUE_SCHEMA`, `VERDICT_SCHEMA`, and
-`ownerPrompt` are repo-local; the schemas force structured output so the driver assembles the
-run report without parsing prose.
+`ownerPrompt(slice, baseSha, mantra, reverseDeps)` embeds the MANTRA, the frozen contract for
+that slice, the `slicePaths` boundary, the worktree base sha, and the slice's **reverse-dependency
+set**: the ids of the modules that import it, so the owner knows whose contract it must not break.
+Without it, an owner trades drift for integration breakage (the explicit H4 hazard). The
+reverse-deps come from the repomap P-1 already builds, so no new artifact is introduced.
+`CRITIQUE_SCHEMA`, `VERDICT_SCHEMA`, and `ownerPrompt` are repo-local; the schemas force
+structured output so the driver assembles the run report without parsing prose.
 
 ## Assembling the run report
 
@@ -177,10 +206,10 @@ After the script returns, the driver builds one `RunReport` and calls `vader per
 ## Sequential fallback (Codex, Hermes, any host without fan-out)
 
 A host with no parallel primitive runs the EXACT same `planTick` output, one agent at a time.
-Nothing about the plan changes: seam slices still run first, every slice still earns its full
-`voters` panel, the verifiers are still independent and refute-first. Only the wall-clock
-differs, and the assembled `RunReport` plus the `vader gate` verdict are byte-identical to the
-parallel path.
+Nothing about the plan changes: seam slices still run first, the deterministic gate still runs on
+the merged tree BEFORE any verifier, every slice still earns its full `voters` panel, the
+verifiers are still independent and refute-first. Only the wall-clock differs, and the assembled
+`RunReport` plus the `vader gate` verdict are byte-identical to the parallel path.
 
 The executor, in pseudocode a single-threaded host can follow verbatim:
 
@@ -194,10 +223,16 @@ const order = [...plan.seamFirst, ...plan.siblings] // seams first, then the res
 const critique = await runAgent(criticPrompt(slices))
 if (critique.blocking.length > 0) return { blocked: 'critic', findings: critique.blocking }
 
-// 2. Owners, one at a time. A single tree is safe because only one writer ever runs.
-for (const t of order) await runAgent(ownerPrompt(byId.get(t.id), baseSha, mantra))
+// 2. Owners, one at a time. A single tree is safe because only one writer ever runs. Each owner
+//    is handed its reverse-dependency set so it does not break an importer it cannot see.
+for (const t of order) await runAgent(ownerPrompt(byId.get(t.id), baseSha, mantra, reverseDeps?.[t.id] ?? []))
 
-// 3. Verifiers, t.voters independent passes per slice, each a fresh context that did not write
+// 3. Deterministic gate FIRST, on the merged tree. A red static gate bounces the tick with ZERO
+//    verifier passes run: never pay for a panel behind a failing free check.
+const gate = await runVaderGate(root)
+if (!gate.pass) return { blocked: 'gate', gate }
+
+// 4. Verifiers, t.voters independent passes per slice, each a fresh context that did not write
 //    the slice. The panel size is identical to the parallel path; the passes just run serially.
 const sliceResults = []
 for (const t of order) {

@@ -6,7 +6,10 @@ import { execFileSync } from 'node:child_process'
 import type { Staleness } from './core.ts'
 
 export function git(root: string, args: string[]): string {
-  return execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim()
+  // Capture stderr instead of inheriting it: a probe that is allowed to fail (a non-git repo, a
+  // missing commit) must not spill git's "fatal: ..." to the CLI's own stderr. On failure the
+  // thrown error still carries stderr for any caller that wants to inspect it.
+  return execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
 }
 
 export function commitExists(root: string, commit: string): boolean {

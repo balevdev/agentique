@@ -71,22 +71,28 @@ out with the harness primitive per `references/recipes.md`:
 - Sibling owners build in parallel, each in an isolated worktree reset to the base sha, so a
   failed slice never poisons the tree.
 - Owners write code only inside their `slicePaths` and carry the MANTRA (the Ladder plus deep
-  modules and thin interfaces). They never touch `constitution.model.*` or
-  `.vader/generated/`; the anti-decay lock makes a silenced failure impossible.
+  modules and thin interfaces), plus their reverse-dependency set (the modules that import the
+  slice, from the P-1 repomap) so they do not break an importer they cannot see. They never touch
+  `constitution.model.*` or `.vader/generated/`; the anti-decay lock makes a silenced failure
+  impossible.
 
 ## P3 Verify (the acceptance gate)
 
-Prove the work before persisting it.
+Prove the work before persisting it. The cheap deterministic gate runs first; the expensive LLM
+panel runs only behind a green one.
 
-- Cross-assigned refute-first verifiers run `references/acceptance-gate.md` verbatim against a
-  slice they did not write. Each returns ACCEPT or REJECT with file:line evidence. Voter count
-  scales with evidence: three for a high-risk slice (a `neverRatchet` class, a class in
-  `topBounces`, or a frozen seam), one otherwise. A slice passes only by majority ACCEPT.
-- `vader gate --root <repo>` is the deterministic arbiter underneath the verifiers: repo check
-  plus fallow (when configured) plus every generated check, returning `pass` and a per-invariant
-  pass/fail list. A failed invariant id is an automatic bounce, no discussion. The gate fails
-  closed if `modelHashLocked` is false (someone touched the protected model) or
-  `enforcementLocked` is false (someone touched a generated check or `gate.json`).
+- `vader gate --root <repo>` runs FIRST, on the merged tree: repo check plus fallow (when
+  configured) plus every generated check, returning `pass` and a per-invariant pass/fail list. A
+  failed invariant id is an automatic bounce, no discussion. The gate fails closed if
+  `modelHashLocked` is false (someone touched the protected model) or `enforcementLocked` is false
+  (someone touched a generated check, a locked law body, `gate.json`, or an enforcement-relevant
+  config flag). A red static gate spawns ZERO verifiers: no token is spent on an LLM panel behind a
+  failing free check.
+- Only on a green gate do cross-assigned refute-first verifiers run `references/acceptance-gate.md`
+  verbatim against a slice they did not write. Each returns ACCEPT or REJECT with file:line
+  evidence. Voter count scales with evidence: three for a high-risk slice (a `neverRatchet` class,
+  a class in `topBounces`, or a frozen seam), one otherwise, and a lone REJECT escalates to a full
+  panel. A slice passes only by majority ACCEPT.
 - A REJECT or a failed id is a slice `bounce`: the verifier records `{ac, reason}`, the slice
   returns to its owner, and the bounce is carried into the run report so the ledger remembers
   it.
@@ -99,8 +105,12 @@ Close the tick deterministically. Assemble one `RunReport` and call `vader persi
   recorded with `vader triage` or inline in the report. Persist refuses if any open risk is
   undispositioned: debt cannot carry silently across a tick.
 - Green gate, build mode: the item is marked `done`. Review mode: the partition stamp advances.
-- The run line and one bounce line per bounce append to the ledger. A class that bounced or saw
-  a non-green gate has its granted ratchet level auto-demoted to zero.
+- Structural debt is non-increasing. Persist computes `debt` (runtime deps + top-level dirs +
+  `rawCheck` escape hatches) and refuses a tick whose `debt` exceeds the previous run-line's,
+  unless a routed model change raised the baseline. A tick that holds or lowers `debt` is free, so
+  cleanup is always allowed and only decay is blocked.
+- The run line (carrying `debt`) and one bounce line per bounce append to the ledger. A class that
+  bounced or saw a non-green gate has its granted ratchet level auto-demoted to zero.
 - A genuine missing distinction (a verifier NOTE that the constitution should name something it
   does not) becomes a `modelChange`: persist parks it in `state.json` and blocks the item. It is
   never auto-applied. A human approves it at the change-the-model gate, after which `vader gen`

@@ -106,6 +106,10 @@ export type RunLine = {
   commitRange: string
   gate: Gate
   slices: { id: string; class: string; verdict: 'accept' | 'bounce' }[]
+  // Structural-debt count at the moment this tick persisted: runtimeDeps + topLevelDirs +
+  // escapeHatches. Non-increasing per tick (persist refuses a rise unless a routed model change
+  // raised the baseline), so the ledger trends decay. Legacy lines predate it and default to 0.
+  debt: number
 }
 export type BounceLine = { type: 'bounce'; run: string; slice: string; class: string; ac: string; reason: string }
 export type LedgerLine = RunLine | BounceLine
@@ -130,6 +134,11 @@ export function paths(root: string) {
     modelTs: join(dir, 'constitution.model.ts'),
     modelJson: join(dir, 'constitution.model.json'),
     generated: join(dir, 'generated'),
+    // Repo-supplied bodies the generated data and behavioral checks import. laws/ is authored
+    // at constitution time (present at gen), so it is folded into the enforcement lock. contracts/
+    // is owner-authored after gen (a behavioral harness stays red until provided), so it is not.
+    laws: join(dir, 'laws'),
+    contracts: join(dir, 'contracts'),
     gate: join(dir, 'gate.json'),
     spec: join(dir, 'spec'),
     runs: join(dir, 'runs'),
@@ -309,5 +318,8 @@ function validateLedgerLine(input: unknown, path: string): LedgerLine {
         verdict: oneOf(slice.verdict, `${path}.slices[${i}].verdict`, ['accept', 'bounce'] as const),
       }
     }),
+    // Legacy run-lines predate the debt term; tolerate their absence with a zero baseline rather
+    // than reject an existing ledger, mirroring how enforcementHash treats pre-lock state.
+    debt: l.debt === undefined ? 0 : num(l.debt, `${path}.debt`),
   }
 }

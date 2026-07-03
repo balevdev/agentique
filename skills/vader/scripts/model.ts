@@ -122,14 +122,88 @@ function listFilesSorted(dir: string): string[] {
 export function enforcementHash(root: string): string {
   const p = paths(root)
   const parts: string[] = []
-  for (const f of listFilesSorted(join(p.generated, 'checks'))) {
-    // Hash the POSIX-normalized relative path so the lock is identical whether gen ran on a
-    // '/'-separator host or a '\\'-separator one. relative() yields native separators; left raw,
-    // the same checkout would lock to different hashes on macOS vs Windows.
-    parts.push(relative(root, f).split(sep).join('/') + '\0' + readFileSync(f, 'utf8'))
+  // The compiled checks AND the repo-supplied law bodies those data checks import. A data check
+  // is only as honest as its law(): locking the generated test but not the law it calls would
+  // leave a tautological `law = () => true` free to pass. laws/ is authored at constitution time
+  // so it is present at gen and safe to lock; contracts/ is deliberately excluded (the owner
+  // writes a behavioral harness AFTER gen, so locking it would trip the gate on legitimate work,
+  // which is why behavioral honesty rests on its red fixture at gate time, not on this lock).
+  for (const dir of [join(p.generated, 'checks'), p.laws]) {
+    for (const f of listFilesSorted(dir)) {
+      // Hash the POSIX-normalized relative path so the lock is identical whether gen ran on a
+      // '/'-separator host or a '\\'-separator one. relative() yields native separators; left raw,
+      // the same checkout would lock to different hashes on macOS vs Windows.
+      parts.push(relative(root, f).split(sep).join('/') + '\0' + readFileSync(f, 'utf8'))
+    }
   }
-  parts.push('gate.json\0' + (existsSync(p.gate) ? readFileSync(p.gate, 'utf8') : ''))
+  const gateRaw = existsSync(p.gate) ? readFileSync(p.gate, 'utf8') : ''
+  parts.push('gate.json\0' + gateRaw)
+  // Fold in the enforcement-relevant config subset (named tsconfig strict flags + the resolved
+  // repoCheck script body). repoCheck runs the repo's own toolchain, so weakening a strict flag
+  // or gutting the check script would defang the gate while it stayed green; the fingerprint
+  // makes that edit flip enforcementLocked exactly like editing a generated check.
+  parts.push('config\0' + configFingerprint(root, gateRaw))
   return hashModel(parts.join('\0\0'))
+}
+
+// The enforcement-relevant slice of the repo's own toolchain config, fingerprinted so the lock
+// covers what repoCheck reads without hashing whole config files (a benign unrelated edit, a new
+// path alias or a formatting rule, must not false-fail the gate). We fingerprint ONLY the strict
+// flags named in gate.json (default: `strict`) and the body of the exact package.json script that
+// repoCheck invokes. Kept in model.ts, operating on the raw gate.json text, so this module stays
+// the single home of integrity and does not import the gate module (which would cycle).
+export function configFingerprint(root: string, gateRaw: string): string {
+  const cfg = parseJsonObject(gateRaw)
+  const named = strArray(cfg['strictFlags'])
+  const flags = named.length > 0 ? named : ['strict']
+  const opts = readCompilerOptions(root)
+  const parts: string[] = []
+  for (const f of [...flags].sort()) parts.push(`ts:${f}=${JSON.stringify(opts[f] ?? null)}`)
+  const script = resolveRepoCheckScript(root, strArray(cfg['repoCheck']))
+  if (script !== null) parts.push(`script:${script.name}=${script.body}`)
+  return hashModel(parts.join('\0'))
+}
+
+function parseJsonObject(raw: string): Record<string, unknown> {
+  try {
+    const v: unknown = JSON.parse(raw)
+    return typeof v === 'object' && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>) : {}
+  } catch {
+    return {}
+  }
+}
+
+function strArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((x): x is string => typeof x === 'string') : []
+}
+
+function readCompilerOptions(root: string): Record<string, unknown> {
+  const fp = join(root, 'tsconfig.json')
+  if (!existsSync(fp)) return {}
+  // Reads this repo's OWN compilerOptions only: `extends` is not resolved, so a strict flag
+  // inherited from a base config is not covered. A tsconfig with comments (jsonc) will not parse
+  // either; we degrade to {} so every named flag reads as null. Both are stable across gen and gate
+  // (no false-fail), they just leave that flag unprotected. See references/constitution.md, the
+  // "Config-fingerprint floor" note.
+  const parsed = parseJsonObject(readFileSync(fp, 'utf8'))
+  const opts = parsed['compilerOptions']
+  return typeof opts === 'object' && opts !== null && !Array.isArray(opts) ? (opts as Record<string, unknown>) : {}
+}
+
+// If repoCheck runs a named package.json script (`<runner> run <name>`), return that script's
+// resolved body so rewriting it (e.g. to `echo ok`) flips the fingerprint. A direct command
+// (e.g. `bunx tsc --noEmit`) has no script body to resolve and returns null.
+function resolveRepoCheckScript(root: string, repoCheck: string[]): { name: string; body: string } | null {
+  const runIdx = repoCheck.indexOf('run')
+  if (runIdx === -1) return null
+  const name = repoCheck[runIdx + 1]
+  if (name === undefined) return null
+  const fp = join(root, 'package.json')
+  if (!existsSync(fp)) return null
+  const scripts = parseJsonObject(readFileSync(fp, 'utf8'))['scripts']
+  if (typeof scripts !== 'object' || scripts === null || Array.isArray(scripts)) return null
+  const body = (scripts as Record<string, unknown>)[name]
+  return typeof body === 'string' ? { name, body } : null
 }
 
 // ---------- router: model -> generated checks ----------
@@ -196,14 +270,26 @@ console.log('${inv.id} ok')
   return { file: `checks/dep-${inv.id}.ts`, body }
 }
 
+// Render human-authored free text (a law/statement/relation description) as a single-line comment
+// tail. A newline would otherwise escape the `//` comment and turn prose into a top-level statement
+// in the generated check; a bare `\r` splits it in the same way. Test titles use JSON.stringify for
+// the same reason (a valid string literal regardless of quotes or newlines in the text).
+const commentText = (s: string): string => s.replace(/[\r\n]+/g, ' ')
+
 // A generated data-law check: seeded-input property test, zero-dep. The repo provides
-// .vader/laws/law-<id>.ts exporting law(input): boolean.
+// .vader/laws/law-<id>.ts exporting law(input): boolean, AND a red fixture
+// .vader/laws/law-<id>.neg.ts exporting `violating`: a known-bad input the law MUST reject.
+// The red fixture is the teeth: a check that can never fail is hollow, so the gate proves this
+// one can. A tautological `law = () => true` passes the property test but fails the red-fixture
+// test (it accepts a value it must reject); a missing fixture leaves the import red, by design.
 function genData(inv: Invariant, check: DataCheck): { file: string; body: string } {
   const lawImport = `../../laws/law-${inv.id}.ts`
+  const negImport = `../../laws/law-${inv.id}.neg.ts`
   const body = `import { test, expect } from 'bun:test'
 // GENERATED by vader from invariant ${inv.id}. Do not edit.
-// LAW: ${check.law}
+// LAW: ${commentText(check.law)}
 import { law } from '${lawImport}'
+import { violating } from '${negImport}'
 function* seeded(seed, count, kind) {
   let s = seed
   for (let i = 0; i < count; i++) {
@@ -211,10 +297,15 @@ function* seeded(seed, count, kind) {
     yield kind === 'int' ? s % 100000 : 'k' + (s % 1000)
   }
 }
-test('${inv.id}: ${check.law.replace(/'/g, "\\'")}', () => {
+test(${JSON.stringify(`${inv.id}: ${check.law}`)}, () => {
   for (const input of seeded(1, ${check.sample.count}, '${check.sample.kind}')) {
     expect(law(input)).toBe(true)
   }
+})
+// Red fixture: the law MUST reject its known-violating input. This is what forces the law to be
+// real; a check that cannot fail earns none of the gold-path guarantees.
+test('${inv.id}: law rejects its red fixture', () => {
+  expect(law(violating)).toBe(false)
 })
 `
   return { file: `checks/data-${inv.id}.test.ts`, body }
@@ -230,7 +321,7 @@ export type ${A} = number & { readonly [__brand]: '${A}' }
 export type ${B} = { readonly t0: number; readonly t1: number } & { readonly [__brand]: '${B}' }
 export const as${A} = (n: number): ${A} => n as ${A}
 export const as${B} = (t0: number, t1: number): ${B} => ({ t0, t1 }) as unknown as ${B}
-// ${check.relation ?? `relation: pointInInterval(p: ${A}, iv: ${B})`}
+// ${commentText(check.relation ?? `relation: pointInInterval(p: ${A}, iv: ${B})`)}
 export const pointInInterval = (p: ${A}, iv: ${B}): boolean => p >= iv.t0 && p <= iv.t1
 `
   const neg = `// GENERATED by vader from invariant ${inv.id}. Do not edit.
@@ -256,11 +347,11 @@ function genBehavioral(inv: Invariant, check: BehavioralCheck): { file: string; 
   const harnessImport = `../../contracts/${check.contractTest}.ts`
   const body = `import { test, expect } from 'bun:test'
 // GENERATED by vader from invariant ${inv.id}. Do not edit.
-// CONTRACT: ${inv.statement}
+// CONTRACT: ${commentText(inv.statement)}
 // The owner must provide .vader/contracts/${check.contractTest}.ts exporting
 //   run(): { outcomePreserved: boolean }
 import { run } from '${harnessImport}'
-test('${inv.id}: ${inv.statement.replace(/'/g, "\\'")}', () => {
+test(${JSON.stringify(`${inv.id}: ${inv.statement}`)}, () => {
   expect(run().outcomePreserved).toBe(true)
 })
 `

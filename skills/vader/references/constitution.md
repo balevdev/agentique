@@ -53,6 +53,26 @@ the two types, a `@ts-expect-error` stops erroring and `tsc` fails on that exact
 is the gold path: a real compile error, not a generated test. Non-TS repos get the universal
 floor instead (a generated property test).
 
+**Template floor, read this before trusting a bare shape invariant.** `gen` emits a *template*
+distinction: two branded types (`as<A>`, `as<B>`) and a synthetic relation over them. That
+distinction only acquires domain teeth once the repo's real code actually imports and uses the
+generated `as<A>`/`as<B>` constructors at the boundary where the two concepts must not be
+confused. A `distinct` invariant whose generated types nothing imports proves a synthetic
+distinction, not your domain's, and cannot catch a real collapse where the repo defines both
+concepts as the same bare alias. Deriving the branded types from a repo-named type is a routed
+model-schema change, not something the current template does; until then, treat a bare shape
+invariant as a floor to be wired up, not a finished check.
+
+**Config-fingerprint floor.** The enforcement hash includes a fingerprint of the named `tsconfig`
+strict flags and the resolved `repoCheck` script body, so weakening a flag or gutting the script
+flips the gate. That fingerprint reads the repo's *own* `tsconfig.json` `compilerOptions` only: it
+does not resolve `extends`, and a tsconfig carrying comments (jsonc) does not JSON-parse, so every
+named flag reads as null. Both cases are stable across `gen` and `gate` (no false-fail), but they
+are not protected: a strict flag inherited from a base config, or declared in a commented tsconfig,
+is outside the floor. If you rely on the config lock, keep the enforcement-relevant flags in the
+repo's own comment-free `tsconfig.json`. Widening this to resolve `extends`/jsonc is a deliberate
+follow-up, not a silent guarantee.
+
 ## dependency: an import or structural boundary
 
 ```json
@@ -83,6 +103,15 @@ depth).
 `.vader/laws/law-<id>.ts` exporting `law(input): boolean`. The generator owns the sampling
 and the assertion; you own the law.
 
+You also supply a **red fixture** next to the law at `.vader/laws/law-<id>.neg.ts` exporting
+`violating`: a known-bad input the law MUST reject. The generated test asserts `law(violating)`
+is `false`. This is what forces the law to be real: a tautological `law = () => true` passes the
+property test but fails the red fixture, because it accepts a value it was supposed to reject. A
+data invariant with no red fixture stays red (the import fails) by design; a check that cannot be
+shown to fail earns none of the gold-path guarantees. Both the law and its fixture live under
+`.vader/laws/`, which is folded into the enforcement lock at `gen`, so editing either after `gen`
+(for instance, hollowing the law) fails the gate closed exactly like editing a generated check.
+
 ## behavioral: a property provable only by exercising behavior
 
 ```json
@@ -97,6 +126,13 @@ and the assertion; you own the law.
 `vader gen` emits a contract test that stays red until the owner provides the harness at
 `.vader/contracts/retry-outcome.ts` exporting `run(): { outcomePreserved: boolean }`. The
 distinction is named now; the proof arrives with the slice that implements it.
+
+Because the harness is authored AFTER `gen` (that is what "stays red until the owner provides"
+means), `.vader/contracts/` is deliberately **not** folded into the enforcement lock: locking it
+at `gen` would trip the gate the moment the owner legitimately writes the harness. Behavioral
+honesty therefore rests on the harness being human-reviewed, not on immutability, which is weaker
+than the data path. Prefer a `data` law with a red fixture whenever the property can be expressed
+over values; reserve `behavioral` for properties provable only by exercising behavior.
 
 ## escape: rawCheck
 

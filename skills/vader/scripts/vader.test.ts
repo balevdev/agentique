@@ -403,6 +403,170 @@ test('AC-lock: re-gen after a gate.json change re-locks the enforcement surface'
   expect(res.pass).toBe(true)
 })
 
+// ---------- law lock + data red fixture (hollow-pass teeth) ----------
+
+// A data invariant, its real law, and its red fixture, all present at gen so the law is locked.
+function genDataRepo(root: string, law: string, violating: string): void {
+  cmdInit(root)
+  writeFileSync(paths(root).gate, JSON.stringify({ repoCheck: ['true'] }))
+  mkdirSync(join(root, '.vader', 'laws'), { recursive: true })
+  writeFileSync(join(root, '.vader', 'laws', 'law-D.ts'), law)
+  writeFileSync(join(root, '.vader', 'laws', 'law-D.neg.ts'), violating)
+  writeFileSync(
+    paths(root).modelJson,
+    JSON.stringify({
+      concepts: {},
+      invariants: [{ id: 'D', kind: 'data', statement: 'non-negative', check: { law: 'x >= 0', sample: { kind: 'int', count: 10 } } }],
+    }),
+  )
+}
+
+test('law-lock: editing a locked law body after gen flips enforcementLocked and fails the gate', async () => {
+  const root = tmpRepo()
+  genDataRepo(root, 'export const law = (x: number): boolean => x >= 0\n', 'export const violating = -1\n')
+  await cmdGen(root)
+  expect((await cmdGate(root)).pass).toBe(true)
+  // an agent rewrites the repo-supplied law to a tautology to pass hollow; the lock now covers it
+  writeFileSync(join(root, '.vader', 'laws', 'law-D.ts'), 'export const law = (_x: number): boolean => true\n')
+  const res = await cmdGate(root)
+  expect(res.enforcementLocked).toBe(false)
+  expect(res.pass).toBe(false)
+})
+
+test('data red fixture: a tautological law present at gen still fails the gate, lock satisfied', async () => {
+  const root = tmpRepo()
+  // the hollow law is locked in AS-IS, so enforcementLocked stays true: the RED FIXTURE is what
+  // bites. A law that accepts its known-violating input cannot be a real check.
+  genDataRepo(root, 'export const law = (_x: number): boolean => true\n', 'export const violating = -1\n')
+  await cmdGen(root)
+  const res = await cmdGate(root)
+  expect(res.enforcementLocked).toBe(true)
+  expect(res.invariants.find((i) => i.id === 'D')?.pass).toBe(false)
+  expect(res.pass).toBe(false)
+})
+
+test('gen: free-text in a law description cannot break out of the generated comment or title', async () => {
+  const root = tmpRepo()
+  // a human writes a multi-line law description carrying a quote and what looks like code. Rendered
+  // raw, the newline escapes the `// LAW:` comment and the single-quoted test title, turning prose
+  // into a top-level statement (uncompilable at best, executed under `bun test` at worst).
+  const nastyLaw = "x >= 0\nprocess.exit(1) // O'Brien says hi"
+  cmdInit(root)
+  writeFileSync(paths(root).gate, JSON.stringify({ repoCheck: ['true'] }))
+  mkdirSync(join(root, '.vader', 'laws'), { recursive: true })
+  writeFileSync(join(root, '.vader', 'laws', 'law-D.ts'), 'export const law = (x: number): boolean => x >= 0\n')
+  writeFileSync(join(root, '.vader', 'laws', 'law-D.neg.ts'), 'export const violating = -1\n')
+  writeFileSync(
+    paths(root).modelJson,
+    JSON.stringify({
+      concepts: {},
+      invariants: [{ id: 'D', kind: 'data', statement: 'non-negative', check: { law: nastyLaw, sample: { kind: 'int', count: 5 } } }],
+    }),
+  )
+  await cmdGen(root)
+  const gen = readFileSync(join(root, '.vader', 'generated', 'checks', 'data-D.test.ts'), 'utf8')
+  expect(gen).not.toMatch(/^process\.exit/m) // the newline never became a top-level statement
+  expect((await cmdGate(root)).pass).toBe(true) // the file still compiles and the real law passes
+})
+
+// ---------- config-subset lock (defang-the-toolchain teeth) ----------
+
+test('config-lock: weakening tsconfig strict after gen fails the gate', async () => {
+  const root = tmpRepo()
+  cmdInit(root)
+  writeFileSync(paths(root).gate, JSON.stringify({ repoCheck: ['true'] }))
+  writeFileSync(paths(root).modelJson, JSON.stringify({ concepts: {}, invariants: [] }))
+  writeFileSync(join(root, 'tsconfig.json'), JSON.stringify({ compilerOptions: { strict: true } }))
+  await cmdGen(root)
+  expect((await cmdGate(root)).pass).toBe(true)
+  // an agent defangs the strongest static checks by turning off strict, gate stays green otherwise
+  writeFileSync(join(root, 'tsconfig.json'), JSON.stringify({ compilerOptions: { strict: false } }))
+  const res = await cmdGate(root)
+  expect(res.enforcementLocked).toBe(false)
+  expect(res.pass).toBe(false)
+})
+
+test('config-lock: a benign unrelated tsconfig edit does NOT fail the gate (false-positive guard)', async () => {
+  const root = tmpRepo()
+  cmdInit(root)
+  writeFileSync(paths(root).gate, JSON.stringify({ repoCheck: ['true'] }))
+  writeFileSync(paths(root).modelJson, JSON.stringify({ concepts: {}, invariants: [] }))
+  writeFileSync(join(root, 'tsconfig.json'), JSON.stringify({ compilerOptions: { strict: true } }))
+  await cmdGen(root)
+  // add an unrelated path alias: only the named strict flags are fingerprinted, so this is benign
+  writeFileSync(join(root, 'tsconfig.json'), JSON.stringify({ compilerOptions: { strict: true, baseUrl: '.', paths: { '@/*': ['src/*'] } } }))
+  const res = await cmdGate(root)
+  expect(res.enforcementLocked).toBe(true)
+  expect(res.pass).toBe(true)
+})
+
+test('config-lock: rewriting the repoCheck script body after gen fails the gate', async () => {
+  const root = tmpRepo()
+  cmdInit(root)
+  writeFileSync(join(root, 'package.json'), JSON.stringify({ scripts: { check: 'true' } }))
+  writeFileSync(paths(root).gate, JSON.stringify({ repoCheck: ['bun', 'run', 'check'] }))
+  writeFileSync(paths(root).modelJson, JSON.stringify({ concepts: {}, invariants: [] }))
+  await cmdGen(root)
+  expect((await cmdGate(root)).pass).toBe(true)
+  // an agent guts the check script to a no-op; repoCheck still exits 0, the fingerprint catches it
+  writeFileSync(join(root, 'package.json'), JSON.stringify({ scripts: { check: 'echo defanged' } }))
+  const res = await cmdGate(root)
+  expect(res.enforcementLocked).toBe(false)
+  expect(res.pass).toBe(false)
+})
+
+// ---------- structural-debt ratchet ----------
+
+test('debt: a tick that adds a runtime dependency is refused at persist', () => {
+  const root = tmpRepo()
+  cmdInit(root)
+  expect(cmdPersist(root, report({ run: { id: 'R1' } })).debt).toBe(0) // baseline
+  writeFileSync(join(root, 'package.json'), JSON.stringify({ dependencies: { 'left-pad': '1.0.0' } }))
+  expect(() => cmdPersist(root, report({ run: { id: 'R2' } }))).toThrow(/structural debt would rise/)
+})
+
+test('debt: a routed model change raises the baseline, permitting the rise', () => {
+  const root = tmpRepo()
+  cmdInit(root)
+  cmdPersist(root, report({ run: { id: 'R1' } }))
+  writeFileSync(join(root, 'package.json'), JSON.stringify({ dependencies: { 'left-pad': '1.0.0' } }))
+  const res = cmdPersist(root, report({ run: { id: 'R2' }, modelChange: { proposedBy: 'p', reason: 'need dep', diff: '+dep' } }))
+  expect(res.debt).toBe(1)
+})
+
+test('debt: a tick that lowers debt is accepted', () => {
+  const root = tmpRepo()
+  cmdInit(root)
+  writeFileSync(join(root, 'package.json'), JSON.stringify({ dependencies: { 'left-pad': '1.0.0' } }))
+  expect(cmdPersist(root, report({ run: { id: 'R1' }, modelChange: { proposedBy: 'p', reason: 'seed', diff: '+dep' } })).debt).toBe(1)
+  writeFileSync(join(root, 'package.json'), JSON.stringify({ dependencies: {} }))
+  expect(cmdPersist(root, report({ run: { id: 'R2' } })).debt).toBe(0)
+})
+
+test('debt: the first persist on a repo that already carries debt records a baseline, not a refusal', () => {
+  const root = tmpRepo()
+  cmdInit(root)
+  // Vader is adopted on a real repo that already has runtime deps and a source directory. The very
+  // first tick has NO previous run-line to ratchet against, so it must record the existing debt as
+  // the baseline rather than compare it to an imaginary zero and refuse. (Regression: prevDebt used
+  // to default to 0, so the first persist on any populated repo threw "structural debt would rise".)
+  writeFileSync(join(root, 'package.json'), JSON.stringify({ dependencies: { 'left-pad': '1.0.0', ms: '2.0.0' } }))
+  mkdirSync(join(root, 'src'))
+  const res = cmdPersist(root, report({ run: { id: 'R1' } }))
+  expect(res.debt).toBe(3) // 2 runtime deps + 1 top-level dir
+})
+
+test('debt: an untracked build-output directory is not structural debt (git-tracked dirs only)', () => {
+  const { root } = gitRepo() // README.md tracked at root, no tracked top-level directories
+  cmdInit(root)
+  expect(cmdPersist(root, report({ run: { id: 'R1' } })).debt).toBe(0) // baseline
+  // a build step drops a gitignored output directory between ticks; it is not part of the source
+  // structure the "no new top-level directory" rule protects, so it must not inflate debt.
+  mkdirSync(join(root, 'dist'))
+  writeFileSync(join(root, 'dist', 'bundle.js'), '// built artifact, untracked\n')
+  expect(cmdPersist(root, report({ run: { id: 'R2' } })).debt).toBe(0)
+})
+
 // ---------- gate: batched-shape attribution + model-order preservation ----------
 
 test('cmdGate preserves model order and attributes a batched shape failure to its own id only', async () => {
@@ -410,14 +574,15 @@ test('cmdGate preserves model order and attributes a batched shape failure to it
   cmdInit(root)
   writeFileSync(paths(root).gate, JSON.stringify({ repoCheck: ['true'] }))
   mkdirSync(join(root, '.vader', 'laws'), { recursive: true })
-  writeFileSync(join(root, '.vader', 'laws', 'law-d1.ts'), 'export const law = (_x: unknown): boolean => true\n')
+  writeFileSync(join(root, '.vader', 'laws', 'law-d1.ts'), 'export const law = (x: number): boolean => x >= 0\n')
+  writeFileSync(join(root, '.vader', 'laws', 'law-d1.neg.ts'), 'export const violating = -1\n')
   writeFileSync(
     paths(root).modelJson,
     JSON.stringify({
       concepts: {},
       invariants: [
         { id: 'shapeA', kind: 'shape', statement: 's', check: { distinct: ['PointA', 'IntervalA'] } },
-        { id: 'd1', kind: 'data', statement: 's', check: { law: 'x === x', sample: { kind: 'int', count: 10 } } },
+        { id: 'd1', kind: 'data', statement: 's', check: { law: 'x >= 0', sample: { kind: 'int', count: 10 } } },
         { id: 'shapeB', kind: 'shape', statement: 's', check: { distinct: ['PointB', 'IntervalB'] } },
       ],
     }),

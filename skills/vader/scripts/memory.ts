@@ -4,7 +4,8 @@
 // persist; and the verify-before-trust recall packet. All of it reads and writes the state
 // record in core; recall also consults the model (is it present?) and git (what is stale?).
 
-import { existsSync, readFileSync, appendFileSync } from 'node:fs'
+import { existsSync, readFileSync, appendFileSync, readdirSync } from 'node:fs'
+import { join } from 'node:path'
 import {
   VaderError,
   paths,
@@ -31,7 +32,7 @@ import {
   type RunLine,
 } from './core.ts'
 import { readModel } from './model.ts'
-import { staleness, changedSince, underWatch, commitExists } from './git.ts'
+import { git, staleness, changedSince, underWatch, commitExists } from './git.ts'
 
 // ---------- run report (single persist input, build + review) ----------
 
@@ -259,6 +260,80 @@ export type PersistResult = {
   bounces: number
   demoted: string[]
   stampsAdvanced: string[]
+  debt: number
+}
+
+// The structural-decay number recorded on every run-line. It counts only UNAMBIGUOUS debt units,
+// each computed cheaply from an artifact the persist already touches and each one the constitution
+// already forbids growing without a routed model change:
+//   runtimeDeps   dependencies in package.json (devDependencies excluded: tooling is not runtime)
+//   topLevelDirs  non-dotfile top-level directories (node_modules excluded: it is installed deps)
+//   escapeHatches rawCheck invariants in the model (each earns none of the gold-path guarantees)
+// Deliberately NOT counted: export-surface size, file size, LOC. Those grow during healthy active
+// development, so blocking on them would punish a clean module for being worked on. illegalEdges
+// and cycles are already hard-zeroed on a green tick by the dependency scanner and fallow, so they
+// are not summed here. A .ts-only model (no JSON machine-truth) contributes zero escape hatches.
+export function computeDebt(root: string): number {
+  return runtimeDepCount(root) + topLevelDirCount(root) + escapeHatchCount(root)
+}
+
+function runtimeDepCount(root: string): number {
+  const fp = join(root, 'package.json')
+  if (!existsSync(fp)) return 0
+  try {
+    const pkg: unknown = JSON.parse(readFileSync(fp, 'utf8'))
+    const deps = typeof pkg === 'object' && pkg !== null ? (pkg as Record<string, unknown>)['dependencies'] : undefined
+    return typeof deps === 'object' && deps !== null && !Array.isArray(deps) ? Object.keys(deps).length : 0
+  } catch {
+    return 0
+  }
+}
+
+// Top-level source directories. "No new top-level directory" is a rule about the tracked source
+// tree, so we count git-tracked top-level dirs and ignore untracked build output (dist/, coverage/,
+// out/, ...): counting the raw filesystem would make debt a function of transient, gitignored state
+// and refuse an otherwise-clean tick the moment a build ran. Outside a git repo (or before the first
+// commit) we fall back to a filesystem read that still excludes dotfiles and node_modules.
+function topLevelDirCount(root: string): number {
+  const tracked = trackedTopLevelDirs(root)
+  if (tracked !== null) return tracked
+  let n = 0
+  for (const e of readdirSync(root, { withFileTypes: true })) {
+    if (e.isDirectory() && !e.name.startsWith('.') && e.name !== 'node_modules') n++
+  }
+  return n
+}
+
+function trackedTopLevelDirs(root: string): number | null {
+  let out: string
+  try {
+    // NUL-separated so a path with a space or newline cannot merge two entries into one.
+    out = git(root, ['ls-files', '-z'])
+  } catch {
+    return null // not a git repo: the caller falls back to a filesystem read
+  }
+  const dirs = new Set<string>()
+  for (const f of out.split('\0')) {
+    const slash = f.indexOf('/')
+    if (slash > 0) dirs.add(f.slice(0, slash))
+  }
+  return dirs.size
+}
+
+function escapeHatchCount(root: string): number {
+  const fp = paths(root).modelJson
+  if (!existsSync(fp)) return 0
+  try {
+    const model: unknown = JSON.parse(readFileSync(fp, 'utf8'))
+    const invs = typeof model === 'object' && model !== null ? (model as Record<string, unknown>)['invariants'] : undefined
+    if (!Array.isArray(invs)) return 0
+    return invs.filter((i) => {
+      const check = typeof i === 'object' && i !== null ? (i as Record<string, unknown>)['check'] : undefined
+      return typeof check === 'object' && check !== null && 'rawCheck' in (check as Record<string, unknown>)
+    }).length
+  } catch {
+    return 0
+  }
 }
 
 export function cmdPersist(root: string, reportInput: RunReport | string): PersistResult {
@@ -328,6 +403,24 @@ export function cmdPersist(root: string, reportInput: RunReport | string): Persi
   const modelChangeParked = report.modelChange !== undefined
   if (report.modelChange !== undefined) state.pendingModelChange = report.modelChange
 
+  // structural-debt ratchet: this tick's debt must not exceed the last run-line's, so integrity is
+  // non-decreasing per tick while a tick that holds or lowers it (delete an escape hatch, drop a
+  // dep) is free. The only way to raise the baseline is a routed model change, which is exactly
+  // the human-gated escape valve for a legitimate new dependency or top-level directory. Checked
+  // here, still before any disk write, so a refused tick leaves nothing partially persisted.
+  const debt = computeDebt(root)
+  const prevRun = [...ledger].reverse().find((l): l is RunLine => l.type === 'run')
+  // The first tick has no predecessor to ratchet against, so it records the repo's existing debt as
+  // the baseline. Comparing against an implicit zero would refuse the first persist on any real repo
+  // (which already carries deps and top-level dirs) and break the "adopt Vader on an existing repo"
+  // flow. From the second tick on, debt is non-increasing unless a routed model change lifts it.
+  if (prevRun !== undefined && debt > prevRun.debt && !modelChangeParked) {
+    throw new VaderError(
+      `structural debt would rise from ${prevRun.debt} to ${debt} (runtime deps + top-level dirs + escape-hatch invariants). ` +
+        `Remove the added debt, or route a model change to raise the baseline.`,
+    )
+  }
+
   // build-mode roadmap item: green and unblocked -> done; otherwise blocked.
   if (item !== undefined) {
     item.status = !modelChangeParked && report.run.gate === 'green' ? 'done' : 'blocked'
@@ -388,6 +481,7 @@ export function cmdPersist(root: string, reportInput: RunReport | string): Persi
       commitRange: report.run.commitRange,
       gate: report.run.gate,
       slices: report.slices.map((s) => ({ id: s.id, class: s.class, verdict: s.verdict })),
+      debt,
     },
   ]
   let bounces = 0
@@ -408,6 +502,7 @@ export function cmdPersist(root: string, reportInput: RunReport | string): Persi
     bounces,
     demoted,
     stampsAdvanced,
+    debt,
   }
 }
 

@@ -50,11 +50,20 @@ and produces the identical report and gate verdict.
 The model is a protected artifact. Implementer agents can make code FAIL the gate but cannot
 edit `constitution.model.*`, `generated/`, or `gate.json` to silence a failure. `vader gen`
 records two hashes in `state.json`: the compiled model hash, and an enforcement hash over the
-compiled surface (every file in `generated/checks/` plus `gate.json`, the command the gate
-actually runs). The lock engages when the model is frozen and compiled at P1, and re-freezes
-after an approved model change recompiles. If the on-disk model no longer matches its hash, or
-any generated check or `gate.json` no longer matches the enforcement hash, `vader gate` fails
-closed. Editing the model is a human-gated model-change proposal; editing a generated check or
+compiled surface. That surface is every file in `generated/checks/`, every repo-supplied law body
+in `.vader/laws/` (so a data law and its red fixture cannot be hollowed after `gen`), `gate.json`,
+and a fingerprint of the enforcement-relevant config subset: the named `tsconfig` strict flags
+(default `strict`, extended by `gate.json`'s `strictFlags`) and the resolved body of the
+`package.json` script the `repoCheck` invokes. The fingerprint covers only that named subset, not
+whole config files, so weakening a strict flag declared in the repo's own `tsconfig.json` or gutting
+the check script fails the gate while a benign unrelated edit (a new path alias) does not. It reads
+that `tsconfig.json`'s own `compilerOptions` only: a flag inherited via `extends`, or one in a
+commented (jsonc) tsconfig, is outside this floor (see `references/constitution.md`,
+"Config-fingerprint floor"). `.vader/contracts/` is excluded on purpose: a
+behavioral harness is owner-authored after `gen`, so locking it would trip the gate on legitimate
+work. The lock engages when the model is frozen and compiled at P1, and re-freezes after an
+approved model change recompiles. If the on-disk model no longer matches its hash, or any part of
+the enforcement surface no longer matches the enforcement hash, `vader gate` fails closed. Editing the model is a human-gated model-change proposal; editing a generated check or
 the verdict config requires a re-`gen`, which is the operator deliberately re-locking the surface
 (not a silent agent edit). Neither can be silenced by an implementer.
 
@@ -71,6 +80,13 @@ Vader remembers across ticks so an agent rehydrates instead of re-deriving:
   `migration` never ratchet.
 - Bounce-pattern ledger. Every bounce is recorded; recall surfaces `topBounces` and a repeated
   bounce class scales the next tick's voter count.
+- Structural-debt ratchet. Each run-line records `debt`, a single integer counting unambiguous
+  structural debt: runtime dependencies in `package.json`, non-dotfile top-level directories, and
+  `rawCheck` escape-hatch invariants. `vader persist` refuses a tick whose `debt` exceeds the
+  previous run-line's, unless a routed, human-approved model change raised the baseline. A tick
+  that holds or lowers `debt` (drops a dep, deletes an escape hatch) is always free, so structural
+  integrity is non-decreasing per tick while opportunistic cleanup stays rewarded. Export-surface
+  size, file size, and LOC are deliberately not counted: they grow during healthy work.
 
 ## The fallow gate
 
