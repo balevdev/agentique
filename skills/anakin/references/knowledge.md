@@ -1,62 +1,64 @@
 # Init: obtain the repo's knowledge
 
 Goal: after init, any fresh context can act like an engineer who already knows
-this repo — by reading two files. Everything here is learned from the code, never
-invented.
+this repo — from one `recall` call. Everything here is learned from the code,
+never invented. Nothing is written inside the repo.
 
-## 1. Discover the gate → `GATE.md`
+## 1. Register and discover the gate
 
-Find the commands that already define "correct" for this repo: typecheck, lint,
-test, build — from package.json scripts, Makefile, CI config, whatever the repo
-actually uses. If `fallow` is on PATH and the repo has (or can trivially take) a
-`.fallowrc`, include `fallow audit --gate new-only` as a structural step.
+`init --repo .` registers the project (identity = origin URL, so clones and
+moves are the same project). Then find the commands that already define
+"correct" here: typecheck, lint, test, build — from package.json scripts,
+Makefile, CI config, whatever the repo actually uses. If `fallow` is on PATH
+and the repo has (or can trivially take) a `.fallowrc`, include
+`fallow audit --gate new-only` as a structural step.
 
-Write `GATE.md` as a short list of exact shell commands with a one-line reason
-each. Then run the whole gate once. It must be green before any factory work: if
-the baseline is red, report the failures and stop — a factory cannot verify diffs
-against a broken baseline, and fixing it is the human's call (they may make it the
-first roadmap item).
+Store them via `gate set` (stdin JSON: `[{command, reason}]`, ordered). Then
+run the whole gate once. It must be green before any factory work: a red
+baseline → report the failures and stop — fixing it is the human's call (they
+may make it the first task).
 
-## 2. Map the architecture → `KNOWLEDGE.md`
+## 2. Map the architecture into knowledge sections
 
 Prefer `repomap` when available (`repomap index`, then `repomap ask` /
-`repomap graph` for structure and dependencies). Otherwise dispatch read-only
-Explore scouts. Either way, you are extracting facts, and every claim should be
-checkable against a file path.
+`repomap graph`). Otherwise dispatch read-only Explore scouts. Either way you
+are extracting facts; every claim must be checkable against a file path.
 
-Structure the file with these sections, each ending with `verified: <short-sha>`
-of the commit it was checked against:
+Store each fact via `knowledge set` (stdin JSON: kind, title, body,
+paths_glob, verified_sha = current HEAD). Kinds:
 
-- **Layout** — top-level modules/packages and what each owns, one line each.
-- **Boundaries** — dependency rules the code actually observes ("domain/ never
-  imports infra/", "all DB access goes through repositories/"). Only rules the
-  code follows today or the human states; note violations honestly instead of
-  papering over them.
-- **Conventions** — naming, error handling, test placement, patterns a new
-  change is expected to follow. Derived from the dominant pattern in the code.
-- **Sensitive zones** — paths where a defect is expensive: auth, money,
-  migrations, public API contracts, data deletion. This list is what later
-  triggers an independent review on a tick (see tick.md). Be specific: paths,
-  not vibes.
-- **Gotchas** — the non-obvious traps a newcomer would hit. Only real ones.
+- `layout` — what each top-level module owns, one section per area, with
+  `paths_glob` covering it (globs are what scope staleness checks later —
+  set them carefully).
+- `boundary` — dependency rules the code actually observes ("domain/ never
+  imports infra/"). Only rules the code follows today or the human states;
+  note violations honestly. Boundaries are included in every tick's packet.
+- `convention` — naming, error handling, test placement; the dominant pattern
+  a new change is expected to follow.
+- `sensitive_zone` — paths where a defect is expensive: auth, money,
+  migrations, public API contracts, data deletion. Specific paths, not vibes.
+  These trigger independent review on ticks and are in every packet.
+- `gotcha` — real, non-obvious traps only.
 
-Keep the whole file readable in one sitting (~150 lines). It is a map, not a
-wiki: link to files rather than restating their contents.
+Keep bodies short — a map, not a wiki: point to files rather than restating
+them. Aim for what v1 fit in ~150 lines total.
 
 ## 3. Mechanize what deserves it
 
-For each Boundary that matters and is cheap to enforce, add an unchecked
-hardening item to `ROADMAP.md` (create the file if absent) proposing the
-mechanization: an eslint `no-restricted-imports` rule, a fallow boundary, a
-failing test. The principle: a boundary lives in a tool someone else maintains,
-or it lives in KNOWLEDGE.md prose — never in a bespoke engine. The human approves
-these items like any others.
+For each boundary that matters and is cheap to enforce, propose a hardening
+item (an eslint `no-restricted-imports` rule, a fallow boundary, a failing
+test) — it goes into the first task's items or a dedicated hardening task,
+approved like anything else. A boundary lives in a tool someone else
+maintains, or it lives in a knowledge section — never in a bespoke engine.
 
-## Maintaining KNOWLEDGE.md (every phase, forever)
+## Maintaining the map (every phase, forever)
 
-- Before relying on a section whose `verified:` commit is far behind HEAD in the
-  area you're touching, re-check it (repomap or a quick read) and re-stamp.
-- When a tick teaches you something a newcomer would need, add it — smallest
+- The tick checks `knowledge stale --paths <item files>` before building;
+  stale sections get re-verified (repomap or a quick read) and re-stamped via
+  `knowledge set` with the new `verified_sha`.
+- When a tick teaches something a newcomer would need, add it — the smallest
   edit that captures the fact.
 - When reality contradicts the map, the map is wrong: fix it in the same tick
   and say so in the journal. A confident stale map is worse than no map.
+- Cross-project standing preferences of the human (dependency policy, style
+  instincts) belong in `prefs set`, not per-project sections.
