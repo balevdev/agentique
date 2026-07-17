@@ -199,6 +199,37 @@ async function handle(req: Request): Promise<Response> {
 // ---------- main ----------
 
 const argv = flags(process.argv.slice(2));
+
+if (argv.snapshot !== undefined) {
+  const outFile = typeof argv.snapshot === "string" ? argv.snapshot : "anakin-dashboard.html";
+  const db = openDb();
+  const o = overview(db) as any;
+  const projects: Record<string, unknown> = {};
+  const journal: Record<string, unknown> = {};
+  const patches: Record<string, string> = {};
+  if (db) {
+    for (const p of o.projects as any[]) {
+      projects[p.id] = projectPayload(db, p.id);
+      const all = journalPage(db, p.id, { limit: 10000 }).entries;
+      journal[p.id] = all;
+      for (const e of all) if (e.has_patch) {
+        const row = db.query("SELECT patch FROM journal WHERE id = ?").get(e.id) as any;
+        patches[String(e.id)] = row?.patch ?? "";
+      }
+    }
+    db.close();
+  }
+  const data = { overview: o, projects, journal, patches };
+  // <-escape so DB content can never terminate the inline script tag.
+  const html = INDEX_HTML
+    .replace('<link rel="stylesheet" href="/style.css">', () => `<style>\n${CSS}\n</style>`)
+    .replace('<script type="module" src="/app.js"></script>', () =>
+      `<script>window.__SNAPSHOT__=${JSON.stringify(data).replace(/</g, "\\u003c")}</script>\n<script type="module">\n${APP_JS}\n</script>`);
+  writeFileSync(outFile, html);
+  console.log(`anakin dashboard snapshot ${resolve(outFile)}`);
+  process.exit(0);
+}
+
 const port = argv.port !== undefined ? Number(argv.port) : 4600;
 if (!Number.isInteger(port) || port <= 0 || port > 65535) {
   console.error("--port requires a valid port number");

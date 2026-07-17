@@ -213,3 +213,39 @@ describe("dashboard views", () => {
     } finally { d.stop(); }
   });
 });
+
+describe("snapshot", () => {
+  function runDash(args: string[]) {
+    const p = Bun.spawnSync(["bun", DASH, ...args], {
+      env: { ...process.env, ANAKIN_HOME: home }, stdout: "pipe", stderr: "pipe",
+      timeout: 5000,
+    });
+    return { code: p.exitCode, out: p.stdout.toString(), err: p.stderr.toString() };
+  }
+
+  test("writes one self-contained file with data inlined and escaped", () => {
+    const { repo, task } = seed();
+    run(["journal", "append", "--repo", repo],
+      JSON.stringify({ task_id: task.id, entry_kind: "note",
+        decisions: "tried <script>alert(1)</script> in a decision" }));
+    const out = join(home, "snap.html");
+    const r = runDash(["--snapshot", out]);
+    expect(r.code).toBe(0);
+    const html = readFileSync(out, "utf8");
+    expect(html).toContain("window.__SNAPSHOT__");
+    expect(html).toContain("oklch(");
+    // raw script tag from DB data must never appear unescaped
+    expect(html).not.toContain("<script>alert(1)");
+    expect(html).toContain("\\u003cscript>alert(1)");
+    // self-contained: no external refs beyond XML namespaces
+    const refs = html.match(/https?:\/\/[^"'`\s<>)]+/g) ?? [];
+    expect(refs.every((x) => x.startsWith("http://www.w3.org/"))).toBe(true);
+  });
+
+  test("snapshot with no DB still writes a working empty page", () => {
+    const out = join(home, "empty.html");
+    const r = runDash(["--snapshot", out]);
+    expect(r.code).toBe(0);
+    expect(readFileSync(out, "utf8")).toContain("window.__SNAPSHOT__");
+  });
+});
