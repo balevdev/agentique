@@ -183,3 +183,21 @@ describe("dashboard api", () => {
     db.close();
   });
 });
+
+describe("dashboard ui assets", () => {
+  test("serves html with CSP, css tokens, and the built app", async () => {
+    seed();
+    const d = await startDash();
+    try {
+      const home_ = await fetch(`${d.base}/`);
+      expect(home_.headers.get("content-type")).toContain("text/html");
+      expect(home_.headers.get("content-security-policy")).toContain("default-src 'none'");
+      expect(await home_.text()).toContain('<div id="app">');
+      const css = await (await fetch(`${d.base}/style.css`)).text();
+      expect(css).toContain("oklch(");
+      expect(css).toContain('[data-theme="light"]');
+      const js = await (await fetch(`${d.base}/app.js`)).text();
+      expect(js).toContain("renderOverview");
+    } finally { d.stop(); }
+  });
+});
