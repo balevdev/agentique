@@ -122,6 +122,65 @@ function isStale(repo: string, verified: string | null, globsCsv: string): boole
   return outp === null ? true : outp.length > 0;
 }
 
+// ---------- legacy .anakin/ import parsers ----------
+
+const KIND_MAP: Record<string, string> = {
+  layout: "layout", boundaries: "boundary", boundary: "boundary",
+  conventions: "convention", convention: "convention",
+  "sensitive zones": "sensitive_zone", sensitive: "sensitive_zone",
+  gotchas: "gotcha", gotcha: "gotcha",
+};
+
+function parseGateMd(text: string): { command: string; reason: string }[] {
+  const rows: { command: string; reason: string }[] = [];
+  for (const line of text.split("\n")) {
+    const m = line.match(/^[-*]\s+`?([^`—]+?)`?\s*(?:—\s*(.*))?$/);
+    if (m && m[1].trim()) rows.push({ command: m[1].trim(), reason: (m[2] ?? "").trim() });
+  }
+  return rows;
+}
+
+function parseKnowledgeMd(text: string): { kind: string; title: string; body: string; verified_sha: string | null }[] {
+  const sections: { kind: string; title: string; body: string; verified_sha: string | null }[] = [];
+  const parts = text.split(/^## /m).slice(1);
+  for (const part of parts) {
+    const nl = part.indexOf("\n");
+    const heading = part.slice(0, nl).trim();
+    let body = part.slice(nl + 1).trim();
+    const kind = KIND_MAP[heading.toLowerCase()] ?? "gotcha";
+    const vm = body.match(/verified:\s*([0-9a-f]{6,40})/i);
+    if (vm) body = body.replace(vm[0], "").trim();
+    sections.push({ kind, title: heading, body, verified_sha: vm ? vm[1] : null });
+  }
+  return sections;
+}
+
+function parseRoadmapMd(text: string) {
+  const items: any[] = [];
+  let current: any = null;
+  for (const line of text.split("\n")) {
+    const im = line.match(/^- \[( |x)\]\s+(?:\d+\.\s+)?(.+)$/);
+    if (im) {
+      current = { done: im[1] === "x", title: im[2].trim(), files: "", done_when: "", contract: null, sensitive: null };
+      items.push(current);
+    } else if (current) {
+      const fm = line.match(/^\s+(files|done-when|contract|sensitive):\s*(.+)$/);
+      if (fm) {
+        const key = fm[1] === "done-when" ? "done_when" : fm[1];
+        current[key] = fm[2].trim();
+      }
+    }
+  }
+  return items;
+}
+
+function parseJournalMd(text: string): { title: string; body: string }[] {
+  return text.split(/^## /m).slice(1).map(part => {
+    const nl = part.indexOf("\n");
+    return { title: part.slice(0, nl).trim(), body: part.slice(nl + 1).trim() };
+  });
+}
+
 // ---------- subcommands ----------
 
 async function main() {
@@ -391,6 +450,57 @@ async function main() {
         active_task: activeTask(db, pr.id),
         last_entry_at: (db.query("SELECT created_at FROM journal WHERE project_id = ? ORDER BY id DESC LIMIT 1").get(pr.id) as any)?.created_at ?? null,
       })));
+      return;
+    }
+
+    case "import": {
+      if (!repo) die("import requires --repo <path>");
+      const legacyDir = join(resolve(repo), ".anakin");
+      if (!existsSync(legacyDir)) die(`no legacy directory at ${legacyDir}`);
+      const read = (f: string) => existsSync(join(legacyDir, f)) ? readFileSync(join(legacyDir, f), "utf8") : "";
+      try {
+        const db = openDb();
+        const p = projectFor(db, repo)!;
+        const gate = parseGateMd(read("GATE.md"));
+        const know = parseKnowledgeMd(read("KNOWLEDGE.md"));
+        const roadmap = parseRoadmapMd(read("ROADMAP.md"));
+        const entries = parseJournalMd(read("JOURNAL.md"));
+        db.transaction(() => {
+          db.run("DELETE FROM gate_commands WHERE project_id = ?", [p.id]);
+          gate.forEach((g, i) =>
+            db.run("INSERT INTO gate_commands (project_id, ordinal, command, reason) VALUES (?,?,?,?)",
+              [p.id, i + 1, g.command, g.reason]));
+          for (const s of know) {
+            db.run(`INSERT INTO knowledge_sections (project_id, kind, title, body, paths_glob, verified_sha)
+                    VALUES (?,?,?,?,?,?)
+                    ON CONFLICT(project_id, kind, title) DO UPDATE SET
+                      body = excluded.body, verified_sha = excluded.verified_sha, updated_at = datetime('now')`,
+              [p.id, s.kind, s.title, s.body, "", s.verified_sha]);
+          }
+          if (roadmap.length && !activeTask(db, p.id)) {
+            const head = sh(p.abs_path, ["git", "-C", p.abs_path, "rev-parse", "HEAD"]);
+            db.run("INSERT INTO tasks (project_id, title, description, mini_spec, status, baseline_sha) VALUES (?,?,?,?,'approved',?)",
+              [p.id, "Imported roadmap", "migrated from legacy .anakin/", "", head]);
+            const taskId = (db.query("SELECT last_insert_rowid() AS id").get() as any).id;
+            roadmap.forEach((it, i) =>
+              db.run(`INSERT INTO items (task_id, ordinal, title, files, done_when, contract, sensitive, status)
+                      VALUES (?,?,?,?,?,?,?,?)`,
+                [taskId, i + 1, it.title, it.files, it.done_when, it.contract, it.sensitive,
+                 it.done ? "done" : "todo"]));
+          }
+          for (const e of entries) {
+            db.run("INSERT INTO journal (project_id, entry_kind, decisions) VALUES (?, 'note', ?)",
+              [p.id, `[imported] ${e.title}\n${e.body}`]);
+            const jid = (db.query("SELECT last_insert_rowid() AS id").get() as any).id;
+            db.run("INSERT INTO journal_fts (rowid, decisions, questions, item_title) VALUES (?,?,?,?)",
+              [jid, `[imported] ${e.title}\n${e.body}`, "", ""]);
+          }
+        })();
+        console.error(`import complete — review the DB, then delete ${legacyDir} yourself`);
+        out({ gate: gate.length, knowledge: know.length, items: roadmap.length, journal: entries.length });
+      } catch (e) {
+        spool("import", { repo, error: String(e) });
+      }
       return;
     }
 

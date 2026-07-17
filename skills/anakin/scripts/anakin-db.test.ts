@@ -245,6 +245,41 @@ describe("status", () => {
   });
 });
 
+describe("import", () => {
+  test("migrates a legacy .anakin directory into the DB", () => {
+    const repo = makeRepo();
+    const dir = join(repo, ".anakin");
+    mkdirSync(dir);
+    writeFileSync(join(dir, "GATE.md"),
+      "# Gate\n\n- `bun test` — unit tests\n- `bunx tsc --noEmit` — types\n");
+    writeFileSync(join(dir, "KNOWLEDGE.md"),
+      "# Map\n\n## Layout\n\nsrc/ owns everything.\n\nverified: abc1234\n\n## Boundaries\n\ndomain never imports infra.\n\nverified: abc1234\n");
+    writeFileSync(join(dir, "ROADMAP.md"),
+      "# Roadmap\n\n- [x] 1. define contract\n      files: src/api.ts\n      done-when: type exported\n- [ ] 2. use contract\n      files: src/app.ts\n      done-when: renders msg\n      sensitive: public-api\n");
+    writeFileSync(join(dir, "JOURNAL.md"),
+      "# Journal\n\n## 2026-07-17 — tick 1: define contract\ngate: green\ndecisions: exported Greeting\n");
+
+    const r = run(["import", "--repo", repo]);
+    expect(r.code).toBe(0);
+    const summary = r.json();
+    expect(summary.gate).toBe(2);
+    expect(summary.knowledge).toBe(2);
+    expect(summary.items).toBe(2);
+    expect(summary.journal).toBe(1);
+    expect(r.err).toContain("delete");
+
+    const g = run(["gate", "get", "--repo", repo]).json();
+    expect(g[0].command).toBe("bun test");
+    const k = run(["knowledge", "list", "--repo", repo]).json();
+    expect(k.find((s: any) => s.kind === "boundary")).toBeTruthy();
+    const t = run(["task", "show", "--repo", repo]).json();
+    expect(t.title).toBe("Imported roadmap");
+    const items = run(["item", "list", "--repo", repo, "--task", String(t.id)]).json();
+    expect(items[0].status).toBe("done");
+    expect(items[1].sensitive).toBe("public-api");
+  });
+});
+
 describe("init / project identity", () => {
   test("registers a project keyed by normalized origin URL", () => {
     const repo = makeRepo("git@github.com:acme/widget.git");
