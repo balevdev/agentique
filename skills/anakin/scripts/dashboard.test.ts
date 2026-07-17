@@ -249,3 +249,83 @@ describe("snapshot", () => {
     expect(readFileSync(out, "utf8")).toContain("window.__SNAPSHOT__");
   });
 });
+
+import { mkdirSync, rmSync } from "node:fs";
+
+describe("review fixes", () => {
+  test("version seq moves for prefs, gate, knowledge body, and new projects", async () => {
+    const { repo } = seed();
+    const d = await startDash();
+    try {
+      const get = async () => (await (await fetch(`${d.base}/api/version`)).json()).seq;
+      const v0 = await get();
+      run(["prefs", "set", "--key", "tone"], "direct");
+      const v1 = await get();
+      expect(v1).not.toBe(v0);
+      run(["gate", "set", "--repo", repo], JSON.stringify([{ command: "make check", reason: "" }]));
+      const v2 = await get();
+      expect(v2).not.toBe(v1);
+      run(["knowledge", "set", "--repo", repo],
+        JSON.stringify({ kind: "boundary", title: "no-infra", body: "UPDATED BODY, different length", paths_glob: "src/**" }));
+      const v3 = await get();
+      expect(v3).not.toBe(v2);
+      const repo2 = makeRepo();
+      run(["init", "--repo", repo2]);
+      const v4 = await get();
+      expect(v4).not.toBe(v3);
+    } finally { d.stop(); }
+  });
+
+  test("non-loopback Host header is refused", async () => {
+    seed();
+    const d = await startDash();
+    try {
+      const r = await fetch(`${d.base}/api/overview`, { headers: { host: "evil.example.com" } });
+      expect(r.status).toBe(403);
+      expect((await fetch(`${d.base}/api/overview`, { headers: { host: `localhost:${d.port}` } })).status).toBe(200);
+    } finally { d.stop(); }
+  });
+
+  test("unopenable DB yields 500 JSON, not an HTML error page", async () => {
+    const d = await startDash();
+    try {
+      mkdirSync(join(home, "anakin.db")); // a directory named like the DB → open throws
+      const r = await fetch(`${d.base}/api/overview`);
+      expect(r.status).toBe(500);
+      expect(r.headers.get("content-type")).toContain("application/json");
+      expect((await r.json()).error).toBeTruthy();
+    } finally { d.stop(); rmSync(join(home, "anakin.db"), { recursive: true, force: true }); }
+  });
+
+  test("task-less and committed-task questions never count as waiting", async () => {
+    const { repo, task } = seed();
+    // a task-less stop question — nothing could ever clear it
+    run(["journal", "append", "--repo", repo],
+      JSON.stringify({ entry_kind: "stop", decisions: "orphan", questions: "am I forever?" }));
+    const d = await startDash();
+    try {
+      const o = await (await fetch(`${d.base}/api/overview`)).json();
+      expect(o.totals.open_questions).toBe(1); // only the active task's question
+      expect(o.questions).toHaveLength(1);
+      expect(o.questions[0].task_title).toBe("Wire flux");
+    } finally { d.stop(); }
+  });
+
+  test("FTS search is scoped to the viewed project", async () => {
+    const { project, repo } = seed();
+    // second project journals the same distinctive term
+    const repo2 = makeRepo();
+    const p2 = run(["init", "--repo", repo2]).json();
+    run(["journal", "append", "--repo", repo2],
+      JSON.stringify({ entry_kind: "note", decisions: "webhooks flaked here too" }));
+    const d = await startDash();
+    try {
+      const a = await (await fetch(`${d.base}/api/journal/${project.id}?q=webhooks`)).json();
+      expect(a.entries).toHaveLength(1);
+      expect(a.entries[0].decisions).toContain("polling");
+      const b = await (await fetch(`${d.base}/api/journal/${p2.id}?q=webhooks`)).json();
+      expect(b.entries).toHaveLength(1);
+      expect(b.entries[0].decisions).toContain("here too");
+    } finally { d.stop(); }
+  });
+});

@@ -66,7 +66,7 @@ create the DB).
 
 - `/` → `index.html`; `/style.css`; `/app.js` (the in-memory `Bun.build`
   output of `app.ts`).
-- `/api/overview` → `{ projects: [{id, name, root_path, active_task,
+- `/api/overview` → `{ projects: [{id, name, abs_path, active_task,
   items_done, items_total, last_activity, open_questions}], totals: {projects,
   tasks_by_status, ticks_7d, ticks_30d_by_day, open_questions}, recent:
   [journal entries, newest 20 across projects], questions: [open questions
@@ -78,9 +78,11 @@ create the DB).
   journal entries, filtered; `q` uses the existing `journal_fts` table;
   entries carry `has_patch` but not patch bodies.
 - `/api/patch/:journalId` → `text/plain` raw patch (404 if none).
-- `/api/version` → `{ seq }` where `seq` is a cheap change stamp:
-  `max(journal.id) || 0` joined with counts of tasks/items/knowledge rows
-  (string concat). The UI polls this every 2s and refetches the current view
+- `/api/version` → `{ seq }` where `seq` is a 16-hex digest over every
+  visible slice of state: max journal id, task count + max updated_at, item
+  counts, knowledge count + max updated_at + body lengths, project count, and
+  the full (tiny) gate_commands and prefs contents — so timestamp-less writes
+  still move it. The UI polls this every 2s and refetches the current view
   only when `seq` changes.
 
 Unknown routes → 404 JSON `{error}`. Any handler error → 500 JSON `{error}`
@@ -88,7 +90,10 @@ Unknown routes → 404 JSON `{error}`. Any handler error → 500 JSON `{error}`
 
 ### Security
 
-- Listen on `127.0.0.1` only.
+- Listen on `127.0.0.1` only, and reject any request whose `Host` header is
+  not a loopback name (`127.0.0.1`, `localhost`, `[::1]`, with optional port)
+  with 403 — the binding alone does not stop DNS rebinding, which would let a
+  hostile web page read the factory memory.
 - Response header `Content-Security-Policy: default-src 'none'; script-src
   'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:`. The
   snapshot file uses inline script/style instead (`'unsafe-inline'` is
@@ -129,12 +134,13 @@ active task.
 Diff rendering: additions tinted with the accent, deletions dimmed on a darker
 surface with reduced opacity — still only the three hues.
 
-## Views (hash-routed: `#/`, `#/project/:id`, `#/project/:id/journal`, `#/project/:id/knowledge`, `#/project/:id/gate`)
+## Views (hash-routed: `#/`, `#/p/:id`, `#/p/:id/journal`, `#/p/:id/knowledge`, `#/p/:id/gate`)
 
 1. **Overview (`#/`)** — hero stat row (ticks this week, items done/total,
    open questions, active tasks), 30-day tick sparkline (inline SVG built from
    `ticks_30d_by_day`), open questions block at top (they are what waits on
-   the human), recent journal across projects. Left rail lists projects.
+   the human; only questions from tasks still active — approved, in_progress
+   or review — count, so the block can always drain), recent journal across projects. Left rail lists projects.
 2. **Project** — "now playing" card: active task title/status pill/progress
    bar (items done/total), item list with ✓ and `sensitive` markers, gate
    commands with last `gate_verdict`, tree state (expected_tree_hash short +
@@ -146,8 +152,8 @@ surface with reduced opacity — still only the three hues.
 4. **Knowledge** — sections grouped by kind (layout, boundary, convention,
    sensitive_zone, gotcha) with body, `paths_glob`, short `verified_sha`, and
    updated age.
-5. **Gate & Prefs** — gate command list in run order; global and per-project
-   prefs tables.
+5. **Gate & Prefs** — gate command list in run order; the global prefs table
+   (prefs are global-only in the schema).
 
 Empty states everywhere: no DB → "the factory has no memory yet — run
 `/anakin init`"; project with no task → intake hint; empty journal/knowledge →

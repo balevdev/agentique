@@ -3,6 +3,7 @@
 // GET-only JSON API + static UI on 127.0.0.1; never writes to the DB.
 // Zero npm dependencies.
 import { Database } from "bun:sqlite";
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -37,8 +38,10 @@ function openDb(): Database | null {
 
 // ---------- queries ----------
 
-const OPEN_Q = `FROM journal j LEFT JOIN tasks t ON t.id = j.task_id
-  WHERE j.questions != '' AND (t.status IS NULL OR t.status != 'committed')`;
+// Questions count as "waiting on you" only while their task is active —
+// task-less or committed-task questions would otherwise accrete forever
+// (the journal is append-only; nothing could ever clear them).
+const OPEN_Q_WHERE = `j.questions != '' AND t.status IN ('approved','in_progress','review')`;
 
 function overview(db: Database | null) {
   if (!db) return { empty: true, projects: [], recent: [], questions: [],
@@ -60,7 +63,8 @@ function overview(db: Database | null) {
     tasks_by_status: tasksByStatus,
     ticks_7d: (db.query("SELECT COUNT(*) AS c FROM journal WHERE entry_kind = 'tick' AND created_at >= datetime('now','-7 days')").get() as any).c,
     ticks_30d_by_day: db.query("SELECT date(created_at) AS d, COUNT(*) AS c FROM journal WHERE entry_kind = 'tick' AND created_at >= datetime('now','-30 days') GROUP BY d ORDER BY d").all(),
-    open_questions: (db.query(`SELECT COUNT(*) AS c ${OPEN_Q}`).get() as any).c,
+    open_questions: (db.query(`SELECT COUNT(*) AS c FROM journal j
+      JOIN tasks t ON t.id = j.task_id WHERE ${OPEN_Q_WHERE}`).get() as any).c,
   };
   const recent = db.query(`
     SELECT j.id, j.project_id, p.name AS project_name, j.entry_kind, j.gate_verdict,
@@ -69,8 +73,8 @@ function overview(db: Database | null) {
     ORDER BY j.id DESC LIMIT 20`).all();
   const questions = db.query(`
     SELECT j.id, j.project_id, p.name AS project_name, t.title AS task_title, j.questions, j.created_at
-    FROM journal j JOIN projects p ON p.id = j.project_id LEFT JOIN tasks t ON t.id = j.task_id
-    WHERE j.questions != '' AND (t.status IS NULL OR t.status != 'committed')
+    FROM journal j JOIN tasks t ON t.id = j.task_id JOIN projects p ON p.id = j.project_id
+    WHERE ${OPEN_Q_WHERE}
     ORDER BY j.id DESC LIMIT 10`).all();
   return { projects, totals, recent, questions };
 }
@@ -86,8 +90,13 @@ function journalPage(db: Database, projectId: string,
     const match = opt.q.trim().split(/\s+/).map((t) => `"${t.replace(/"/g, "")}"`).join(" ");
     let rowids: number[] = [];
     try {
-      rowids = (db.query("SELECT rowid FROM journal_fts WHERE journal_fts MATCH ? LIMIT 500")
-        .all(match) as any[]).map((r) => r.rowid);
+      // Scoped to the viewed project and newest-first, so the cap drops the
+      // oldest hits deterministically instead of an arbitrary cross-project set.
+      rowids = (db.query(`SELECT f.rowid AS rowid FROM journal_fts f
+          JOIN journal jf ON jf.id = f.rowid
+          WHERE journal_fts MATCH ? AND jf.project_id = ?
+          ORDER BY f.rowid DESC LIMIT 500`)
+        .all(match, projectId) as any[]).map((r) => r.rowid);
     } catch { /* unparseable FTS query → no hits */ }
     if (rowids.length === 0) return { entries: [], next_before: null };
     cond.push(`j.id IN (${rowids.map(() => "?").join(",")})`);
@@ -126,14 +135,24 @@ function projectPayload(db: Database | null, id: string) {
   };
 }
 
+// The seq must move for ANY visible change — including tables with no
+// timestamps (gate_commands, prefs), body-only knowledge upserts, and new
+// projects — so it digests content, not just counts.
 function version(db: Database | null) {
   if (!db) return { seq: "empty" };
-  const r = db.query(`SELECT (SELECT COALESCE(MAX(id), 0) FROM journal) || ':' ||
-      (SELECT COUNT(*) FROM tasks) || ':' ||
-      (SELECT COUNT(*) || '-' || COALESCE(SUM(CASE status WHEN 'done' THEN 1 ELSE 0 END), 0) FROM items) || ':' ||
-      (SELECT COUNT(*) FROM knowledge_sections) || ':' ||
-      (SELECT COALESCE(MAX(updated_at), '') FROM tasks) AS seq`).get() as any;
-  return { seq: r.seq };
+  const parts = db.query(`SELECT
+      (SELECT COALESCE(MAX(id), 0) FROM journal) AS j,
+      (SELECT COUNT(*) || '-' || COALESCE(MAX(updated_at), '') FROM tasks) AS t,
+      (SELECT COUNT(*) || '-' || COALESCE(SUM(CASE status WHEN 'done' THEN 1 ELSE 0 END), 0) FROM items) AS i,
+      (SELECT COUNT(*) || '-' || COALESCE(MAX(updated_at), '') || '-' ||
+              COALESCE(SUM(length(body) + length(paths_glob)), 0) FROM knowledge_sections) AS k,
+      (SELECT COUNT(*) FROM projects) AS p,
+      (SELECT COALESCE(GROUP_CONCAT(x), '') FROM
+        (SELECT project_id || ':' || ordinal || ':' || command || ':' || reason AS x
+         FROM gate_commands ORDER BY project_id, ordinal)) AS g,
+      (SELECT COALESCE(GROUP_CONCAT(x), '') FROM
+        (SELECT key || ':' || body AS x FROM prefs ORDER BY key)) AS pr`).get();
+  return { seq: createHash("sha256").update(JSON.stringify(parts)).digest("hex").slice(0, 16) };
 }
 
 // ---------- http ----------
@@ -148,20 +167,31 @@ if (!build.success) {
 const APP_JS = await build.outputs[0].text();
 
 function json(x: unknown, status = 200): Response {
-  return new Response(JSON.stringify(x), { status, headers: { "content-type": "application/json" } });
+  return new Response(JSON.stringify(x),
+    { status, headers: { "content-type": "application/json", "x-content-type-options": "nosniff" } });
 }
+
+// The 127.0.0.1 binding alone doesn't stop DNS rebinding: a hostile page on a
+// domain rebound to 127.0.0.1 becomes same-origin and could read the factory
+// memory. Refuse any request whose Host isn't a loopback name.
+const HOST_RE = /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/;
 
 async function handle(req: Request): Promise<Response> {
   const url = new URL(req.url);
   const p = url.pathname;
+  if (!HOST_RE.test(req.headers.get("host") ?? "")) return json({ error: "bad host" }, 403);
   if (req.method !== "GET") return json({ error: "read-only" }, 405);
   if (p === "/") return new Response(INDEX_HTML,
-    { headers: { "content-type": "text/html; charset=utf-8", "content-security-policy": CSP } });
-  if (p === "/style.css") return new Response(CSS, { headers: { "content-type": "text/css; charset=utf-8" } });
-  if (p === "/app.js") return new Response(APP_JS, { headers: { "content-type": "text/javascript; charset=utf-8" } });
+    { headers: { "content-type": "text/html; charset=utf-8", "content-security-policy": CSP,
+                 "x-content-type-options": "nosniff" } });
+  if (p === "/style.css") return new Response(CSS,
+    { headers: { "content-type": "text/css; charset=utf-8", "x-content-type-options": "nosniff" } });
+  if (p === "/app.js") return new Response(APP_JS,
+    { headers: { "content-type": "text/javascript; charset=utf-8", "x-content-type-options": "nosniff" } });
   if (!p.startsWith("/api/")) return json({ error: "not found" }, 404);
-  const db = openDb();
+  let db: Database | null = null;
   try {
+    db = openDb(); // inside the try: an unopenable DB must yield JSON, not an HTML error page
     if (p === "/api/overview") return json(overview(db));
     if (p === "/api/version") return json(version(db));
     let m = p.match(/^\/api\/project\/([^/]+)$/);
@@ -185,7 +215,8 @@ async function handle(req: Request): Promise<Response> {
     if (m) {
       const row = db?.query("SELECT patch FROM journal WHERE id = ?").get(Number(m[1])) as any;
       if (!row || row.patch == null) return json({ error: "no patch" }, 404);
-      return new Response(row.patch, { headers: { "content-type": "text/plain; charset=utf-8" } });
+      return new Response(row.patch,
+        { headers: { "content-type": "text/plain; charset=utf-8", "x-content-type-options": "nosniff" } });
     }
     return json({ error: "not found" }, 404);
   } catch (e) {
