@@ -162,6 +162,89 @@ describe("journal", () => {
   });
 });
 
+describe("recall", () => {
+  function seed(repo: string) {
+    run(["init", "--repo", repo]);
+    const sha = Bun.spawnSync(["git", "-C", repo, "rev-parse", "HEAD"]).stdout.toString().trim();
+    run(["prefs", "set", "--key", "style"], "boring code wins");
+    run(["gate", "set", "--repo", repo], JSON.stringify([{ command: "bun test", reason: "" }]));
+    run(["knowledge", "set", "--repo", repo],
+      JSON.stringify({ kind: "convention", title: "naming", body: "snake files", paths_glob: "src/**", verified_sha: sha }));
+    run(["knowledge", "set", "--repo", repo],
+      JSON.stringify({ kind: "boundary", title: "no-infra-in-domain", body: "domain never imports infra", paths_glob: "other/**", verified_sha: sha }));
+    run(["knowledge", "set", "--repo", repo],
+      JSON.stringify({ kind: "gotcha", title: "unrelated", body: "docs quirk", paths_glob: "docs/**", verified_sha: sha }));
+    const t = run(["task", "new", "--repo", repo], JSON.stringify({ title: "T" })).json();
+    run(["task", "approve", "--repo", repo, "--id", String(t.id)]);
+    const it = run(["item", "add", "--repo", repo, "--task", String(t.id)],
+      JSON.stringify({ ordinal: 1, title: "flux capacitor wiring", files: "src/flux.ts", done_when: "green" })).json();
+    return { t, it, sha };
+  }
+
+  test("packet: task, next item, scoped knowledge (globs + all boundaries), prefs, FTS hits", () => {
+    const repo = makeRepo();
+    const { t, it } = seed(repo);
+    // a past decision mentioning the same words, findable via FTS...
+    run(["journal", "append", "--repo", repo],
+      JSON.stringify({ task_id: t.id, entry_kind: "note", decisions: "flux capacitor needs shielding" }));
+    // ...pushed beyond the 5-entry tail by newer unrelated entries (FTS is for old memory)
+    for (let i = 0; i < 5; i++) {
+      run(["journal", "append", "--repo", repo],
+        JSON.stringify({ task_id: t.id, entry_kind: "note", decisions: `routine entry ${i}` }));
+    }
+    const r = run(["recall", "--repo", repo]).json();
+    expect(r.task.id).toBe(t.id);
+    expect(r.next_item.id).toBe(it.id);
+    expect(r.gate).toHaveLength(1);
+    const titles = r.knowledge.map((k: any) => k.title).sort();
+    expect(titles).toEqual(["naming", "no-infra-in-domain"]); // glob match + boundary always; gotcha excluded
+    expect(r.prefs[0].body).toBe("boring code wins");
+    expect(r.fts_hits.length).toBeGreaterThan(0);
+    expect(r.fts_hits[0].decisions).toContain("shielding");
+  });
+
+  test("open questions and expected tree hash come from the journal tail", () => {
+    const repo = makeRepo();
+    const { t, it } = seed(repo);
+    run(["journal", "append", "--repo", repo],
+      JSON.stringify({ task_id: t.id, item_id: it.id, entry_kind: "stop",
+        questions: "which currency rounding?", tree_hash: "TH1", head_sha: "b".repeat(40) }));
+    const r = run(["recall", "--repo", repo]).json();
+    expect(r.open_questions).toEqual(["which currency rounding?"]);
+    expect(r.expected_tree_hash).toBe("TH1");
+  });
+
+  test("human commit flips review task to committed, with no stale expectations", () => {
+    const repo = makeRepo();
+    const { t, it } = seed(repo);
+    const head = Bun.spawnSync(["git", "-C", repo, "rev-parse", "HEAD"]).stdout.toString().trim();
+    run(["journal", "append", "--repo", repo],
+      JSON.stringify({ task_id: t.id, item_id: it.id, entry_kind: "tick", gate_verdict: "green", tree_hash: "TH", head_sha: head }));
+    run(["task", "close", "--repo", repo, "--id", String(t.id)]);
+    // human commits
+    writeFileSync(join(repo, "b.txt"), "human work\n");
+    Bun.spawnSync(["git", "-C", repo, "add", "-A"]);
+    Bun.spawnSync(["git", "-C", repo, "commit", "-qm", "human: ship task"]);
+    const r = run(["recall", "--repo", repo]).json();
+    expect(r.task).toBeNull();
+    expect(r.expected_tree_hash).toBeNull();
+    const shown = run(["task", "show", "--repo", repo, "--id", String(t.id)]).json();
+    expect(shown.status).toBe("committed");
+  });
+});
+
+describe("status", () => {
+  test("cross-project overview", () => {
+    const a = makeRepo("git@github.com:acme/a.git");
+    const b = makeRepo("git@github.com:acme/b.git");
+    run(["init", "--repo", a]);
+    run(["init", "--repo", b]);
+    const s = run(["status"]).json();
+    expect(s).toHaveLength(2);
+    expect(s[0]).toHaveProperty("active_task");
+  });
+});
+
 describe("init / project identity", () => {
   test("registers a project keyed by normalized origin URL", () => {
     const repo = makeRepo("git@github.com:acme/widget.git");

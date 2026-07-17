@@ -301,6 +301,99 @@ async function main() {
       return;
     }
 
+    case "recall": {
+      if (!repo) die("recall requires --repo <path>");
+      const db = openDb();
+      const p = projectFor(db, repo)!;
+      let task = activeTask(db, p.id);
+
+      const lastWithHead = task
+        ? db.query(`SELECT head_sha, tree_hash FROM journal
+                    WHERE task_id = ? AND head_sha IS NOT NULL ORDER BY id DESC LIMIT 1`).get(task.id) as any
+        : null;
+
+      // review → committed flip when the human has committed (HEAD moved)
+      if (task?.status === "review" && lastWithHead?.head_sha) {
+        const head = sh(p.abs_path, ["git", "-C", p.abs_path, "rev-parse", "HEAD"]);
+        if (head && head !== lastWithHead.head_sha) {
+          db.run("UPDATE tasks SET status = 'committed', updated_at = datetime('now') WHERE id = ?", [task.id]);
+          task = null;
+        }
+      }
+
+      const items = task
+        ? db.query("SELECT * FROM items WHERE task_id = ? ORDER BY ordinal").all(task.id) as any[]
+        : [];
+      const nextItem = items.find(i => i.status === "todo") ?? null;
+      const itemFiles = nextItem
+        ? String(nextItem.files).split(",").map((f: string) => f.trim()).filter(Boolean)
+        : [];
+
+      const allKnowledge = db.query("SELECT id, kind, title, body, paths_glob, verified_sha FROM knowledge_sections WHERE project_id = ?").all(p.id) as any[];
+      const knowledge = nextItem
+        ? allKnowledge.filter(k =>
+            k.kind === "boundary" || k.kind === "sensitive_zone" || globsCover(k.paths_glob, itemFiles))
+        : allKnowledge;
+
+      const tail = db.query(`SELECT id, task_id, item_id, entry_kind, gate_verdict, decisions,
+                                    questions, head_sha, tree_hash, created_at
+                             FROM journal WHERE project_id = ? ORDER BY id DESC LIMIT 5`).all(p.id) as any[];
+
+      const openQuestions = task
+        ? (db.query(`SELECT questions FROM journal WHERE task_id = ? AND questions != ''
+                     ORDER BY id DESC LIMIT 5`).all(task.id) as any[]).map(r => r.questions)
+        : [];
+
+      let ftsHits: any[] = [];
+      if (nextItem) {
+        const tokens = String(nextItem.title + " " + nextItem.done_when)
+          .replace(/[^A-Za-z0-9 ]/g, " ").split(/\s+/).filter(w => w.length > 2);
+        if (tokens.length) {
+          const q = tokens.map(t2 => `"${t2}"`).join(" OR ");
+          const tailIds = new Set(tail.map(e => e.id));
+          const rowids = (db.query("SELECT rowid FROM journal_fts WHERE journal_fts MATCH ? LIMIT 10").all(q) as any[])
+            .map(r => r.rowid).filter(id => !tailIds.has(id)).slice(0, 5);
+          if (rowids.length) {
+            ftsHits = db.query(`SELECT id, entry_kind, decisions, questions, created_at FROM journal
+                                WHERE id IN (${rowids.map(() => "?").join(",")}) AND project_id = ?`)
+              .all(...rowids, p.id) as any[];
+          }
+        }
+      }
+
+      const refreshed = task
+        ? db.query(`SELECT head_sha, tree_hash FROM journal
+                    WHERE task_id = ? AND tree_hash IS NOT NULL ORDER BY id DESC LIMIT 1`).get(task.id) as any
+        : null;
+
+      out({
+        project: p,
+        prefs: db.query("SELECT key, body FROM prefs ORDER BY key").all(),
+        task,
+        next_item: nextItem,
+        items_remaining: items.filter(i => i.status === "todo").length,
+        gate: db.query("SELECT ordinal, command, reason FROM gate_commands WHERE project_id = ? ORDER BY ordinal").all(p.id),
+        knowledge,
+        journal_tail: tail,
+        open_questions: openQuestions,
+        expected_tree_hash: refreshed?.tree_hash ?? null,
+        expected_head_sha: refreshed?.head_sha ?? null,
+        fts_hits: ftsHits,
+      });
+      return;
+    }
+
+    case "status": {
+      const db = openDb();
+      const projects = db.query("SELECT * FROM projects ORDER BY name").all() as any[];
+      out(projects.map(pr => ({
+        project: { id: pr.id, name: pr.name, abs_path: pr.abs_path },
+        active_task: activeTask(db, pr.id),
+        last_entry_at: (db.query("SELECT created_at FROM journal WHERE project_id = ? ORDER BY id DESC LIMIT 1").get(pr.id) as any)?.created_at ?? null,
+      })));
+      return;
+    }
+
     default:
       die(`unknown command: ${cmd ?? "(none)"}`);
   }
