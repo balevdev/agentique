@@ -3,9 +3,10 @@
 Opinionated software factories for agents, free and in the open. Two skills:
 
 - **`anakin`** — the current factory. Minimal and knowledge-first: it learns the repo's real
-  architecture into plain markdown, gates every tick on the repo's own toolchain, builds in the
-  main context (subagents only read), and ships one verified diff per tick. ~2.7k instruction
-  tokens per tick, zero bespoke engine code. Start here.
+  architecture into a global SQLite database (`~/.anakin/anakin.db` — nothing is ever written
+  or committed inside your repo), gates every tick on the repo's own toolchain, builds in the
+  main context (subagents only read), and journals one verified patch per tick. The human
+  reviews and commits each finished task. Start here.
 - **`vader`** — the predecessor, parked. A compiled-constitution factory with fingerprint locks,
   worktree fan-out, and refute-first voter panels. It works, but costs ~20 subagent dispatches
   and ~13k instruction tokens per tick; anakin keeps its load-bearing ideas (deterministic gate
@@ -29,19 +30,23 @@ Pass `-g` for a global install, or `-a claude-code` (etc.) to target one agent. 
 
 ## What anakin is
 
-One approved spec becomes shipped code through small, verified, journaled diffs. One tick = one
-roadmap item = one reviewable commit; between ticks the context is discarded and the committed
-`.anakin/` markdown files (`KNOWLEDGE.md`, `GATE.md`, `SPEC.md`, `ROADMAP.md`, `JOURNAL.md`)
-are the only memory.
+One approved task becomes a reviewed diff through small, verified, journaled ticks. One tick =
+one item = one verified patch; between ticks the context is discarded and the global database
+at `~/.anakin/anakin.db` (projects, tasks, items, knowledge sections, gate commands, journal
+with full-text search, cross-project prefs) is the only memory. The factory never commits and
+never creates files in the repo — each tick's diff is journaled as a patch, and the human
+reviews and commits when the task closes.
 
-The operating principles: context is finite (a tick reads a bounded packet); knowledge is
-obtained from the repo, not imposed as invariants (boundaries worth enforcing get mechanized
-into lint rules, fallow config, or real tests — tools someone else maintains); determinism
-beats discipline (the repo's own typecheck/lint/tests/fallow are the gate, and a red gate
-spawns zero reviewers); the main context builds (no relay chains); ask before spec, never
-mid-tick (one mandatory human gate at spec approval, clean journaled stops everywhere else).
+The operating principles: context is finite (a tick rehydrates from one `recall` call); the
+repo belongs to the human (no factory files, no factory commits); knowledge is obtained from
+the repo, not imposed as invariants (boundaries worth enforcing get mechanized into lint
+rules, fallow config, or real tests); determinism beats discipline (the repo's own
+typecheck/lint/tests are the gate, and a red gate spawns zero reviewers); the main context
+builds; ask at intake, never mid-tick.
 
-Run it with `/anakin` driven by `/loop`. See `skills/anakin/SKILL.md`.
+Run it with `/anakin` driven by `/loop`. Memory access goes through
+`skills/anakin/scripts/anakin-db.ts` (bun, zero dependencies). See `skills/anakin/SKILL.md`;
+design: `docs/superpowers/specs/2026-07-17-anakin-v2-sqlite-factory-design.md`.
 
 ## What vader is (parked)
 
@@ -129,14 +134,17 @@ Then run:
 agentique/
 ├── skills/
 │   ├── anakin/
-│   │   ├── SKILL.md                 # principles, state files, phase routing, stop conditions
+│   │   ├── SKILL.md                 # principles, DB memory, phase routing, stop conditions
 │   │   ├── commands/
 │   │   │   └── anakin.md            # /anakin: one step per firing, pacing, arguments
-│   │   └── references/
-│   │       ├── knowledge.md         # init: discover GATE.md, learn KNOWLEDGE.md, mechanize boundaries
-│   │       ├── conceive.md          # interview-first spec flow, the one human gate
-│   │       ├── decompose.md         # spec → one-tick roadmap items, sizing and ordering
-│   │       └── tick.md              # recall → verify map → build → gate → review → persist
+│   │   ├── references/
+│   │   │   ├── knowledge.md         # init: gate discovery, knowledge sections, mechanization
+│   │   │   ├── task.md              # intake: interview → mini-spec → items → approval
+│   │   │   └── tick.md              # recall → reconcile → build → gate → review → persist
+│   │   └── scripts/
+│   │       ├── anakin-db.ts         # the memory CLI (bun:sqlite, zero deps)
+│   │       ├── schema.sql           # tables + FTS5
+│   │       └── anakin-db.test.ts    # bun test suite
 │   └── vader/                       # parked: SKILL.md, commands/, references/, scripts/ (CLI + tests)
 └── extensions/
     └── vader/
