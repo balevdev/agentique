@@ -15,8 +15,9 @@ again with the same ask rather than guessing.
 
 ## 2. Reconcile the tree
 
-Compute `git diff HEAD | shasum -a 256` and compare with the packet's
-`expected_tree_hash` (also check HEAD vs `expected_head_sha`):
+Compute `git diff HEAD | shasum -a 256` (first field only; use `sha256sum`
+where `shasum` is absent) and compare with the packet's `expected_tree_hash`
+(also check HEAD vs `expected_head_sha`):
 
 - **Hashes match** (or both empty) → proceed.
 - **Tree differs** → the human edited mid-task. Read their changes

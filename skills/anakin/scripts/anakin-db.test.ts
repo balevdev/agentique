@@ -280,6 +280,64 @@ describe("import", () => {
   });
 });
 
+describe("guardrails (code-review fixes)", () => {
+  test("bare numeric flags are rejected, never coerced to row id 1", () => {
+    const repo = makeRepo();
+    run(["init", "--repo", repo]);
+    const t = run(["task", "new", "--repo", repo], JSON.stringify({ title: "T" })).json();
+    run(["task", "approve", "--repo", repo, "--id", String(t.id)]);
+    const it = run(["item", "add", "--repo", repo, "--task", String(t.id)],
+      JSON.stringify({ ordinal: 1, title: "a", files: "", done_when: "x" })).json();
+
+    const badCheck = run(["item", "check", "--repo", repo, "--id", String(it.id), "--journal"]);
+    expect(badCheck.code).not.toBe(0);
+    expect(run(["item", "list", "--repo", repo, "--task", String(t.id)]).json()[0].status).toBe("todo");
+
+    const badApprove = run(["task", "approve", "--repo", repo, "--id"]);
+    expect(badApprove.code).not.toBe(0);
+  });
+
+  test("status transitions are guarded: approve only drafts, close only active", () => {
+    const repo = makeRepo();
+    run(["init", "--repo", repo]);
+    const t = run(["task", "new", "--repo", repo], JSON.stringify({ title: "T" })).json();
+    run(["task", "approve", "--repo", repo, "--id", String(t.id)]);
+    run(["task", "close", "--repo", repo, "--id", String(t.id)]);
+    // re-approving a task in review must be refused, not silently resurrected
+    const r = run(["task", "approve", "--repo", repo, "--id", String(t.id)]);
+    expect(r.code).not.toBe(0);
+    expect(run(["task", "show", "--repo", repo, "--id", String(t.id)]).json().status).toBe("review");
+    // closing a review task again is also refused
+    expect(run(["task", "close", "--repo", repo, "--id", String(t.id)]).code).not.toBe(0);
+  });
+
+  test("task new payload is spooled when the DB is unwritable", () => {
+    const repo = makeRepo();
+    run(["init", "--repo", repo]);
+    rmSync(join(home, "anakin.db-wal"), { force: true });
+    rmSync(join(home, "anakin.db-shm"), { force: true });
+    chmodSync(join(home, "anakin.db"), 0o444);
+    const r = run(["task", "new", "--repo", repo], JSON.stringify({ title: "precious ticket" }));
+    chmodSync(join(home, "anakin.db"), 0o644);
+    expect(r.code).not.toBe(0);
+    expect(r.err).toContain("spooled");
+    const spooled = readdirSync(join(home, "spool"));
+    expect(spooled.length).toBe(1);
+    expect(readFileSync(join(home, "spool", spooled[0]), "utf8")).toContain("precious ticket");
+  });
+
+  test("journal append with a missing patch file spools instead of crashing", () => {
+    const repo = makeRepo();
+    run(["init", "--repo", repo]);
+    const r = run(["journal", "append", "--repo", repo, "--patch-file", join(home, "nope.diff")],
+      JSON.stringify({ entry_kind: "note", decisions: "keep me" }));
+    expect(r.code).not.toBe(0);
+    expect(r.err).toContain("spooled");
+    const spooled = readdirSync(join(home, "spool"));
+    expect(readFileSync(join(home, "spool", spooled[0]), "utf8")).toContain("keep me");
+  });
+});
+
 describe("init / project identity", () => {
   test("registers a project keyed by normalized origin URL", () => {
     const repo = makeRepo("git@github.com:acme/widget.git");
