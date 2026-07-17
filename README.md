@@ -1,9 +1,17 @@
 # agentique
 
-An opinionated software factory for agents, free and in the open. One skill, `vader`: it turns
-one idea, or one existing repo, into invariant-checked shipped code, built or hardened one slice
-batch per tick, in any repo root, without letting the architecture decay across hundreds of
-agent ticks.
+Opinionated software factories for agents, free and in the open. Two skills:
+
+- **`anakin`** — the current factory. Minimal and knowledge-first: it learns the repo's real
+  architecture into plain markdown, gates every tick on the repo's own toolchain, builds in the
+  main context (subagents only read), and ships one verified diff per tick. ~2.7k instruction
+  tokens per tick, zero bespoke engine code. Start here.
+- **`vader`** — the predecessor, parked. A compiled-constitution factory with fingerprint locks,
+  worktree fan-out, and refute-first voter panels. It works, but costs ~20 subagent dispatches
+  and ~13k instruction tokens per tick; anakin keeps its load-bearing ideas (deterministic gate
+  before any LLM review, rehydrate don't re-derive, one item one diff) and deletes the rest.
+  Kept for reference until anakin has fully replaced it; see the design doc in
+  `docs/specs/2026-07-17-anakin-design.md` for the full comparison.
 
 The name is *agent* plus *etiquette*: an agent that says *bonjour* before it `sudo`s, asks
 *pardon* before it pushes, and never finishes a sentence with an em dash.
@@ -19,7 +27,23 @@ npx skills add balevdev/agentique
 Pass `-g` for a global install, or `-a claude-code` (etc.) to target one agent. See
 `npx skills add --help` for the full set.
 
-## What vader is
+## What anakin is
+
+One approved spec becomes shipped code through small, verified, journaled diffs. One tick = one
+roadmap item = one reviewable commit; between ticks the context is discarded and the committed
+`.anakin/` markdown files (`KNOWLEDGE.md`, `GATE.md`, `SPEC.md`, `ROADMAP.md`, `JOURNAL.md`)
+are the only memory.
+
+The operating principles: context is finite (a tick reads a bounded packet); knowledge is
+obtained from the repo, not imposed as invariants (boundaries worth enforcing get mechanized
+into lint rules, fallow config, or real tests — tools someone else maintains); determinism
+beats discipline (the repo's own typecheck/lint/tests/fallow are the gate, and a red gate
+spawns zero reviewers); the main context builds (no relay chains); ask before spec, never
+mid-tick (one mandatory human gate at spec approval, clean journaled stops everywhere else).
+
+Run it with `/anakin` driven by `/loop`. See `skills/anakin/SKILL.md`.
+
+## What vader is (parked)
 
 An agent loop is a box with no memory of what it meant. Vader puts the meaning *outside* the
 box. A human authors a `constitution.model` that names the semantic distinctions which must
@@ -103,25 +127,21 @@ Then run:
 
 ```
 agentique/
-├── extensions/
-│   └── vader/
-│       ├── index.ts                 # Pi companion slash commands and TUI wizard
-│       └── extension.test.ts        # behavior tests for prompt/status state
-└── skills/
+├── skills/
+│   ├── anakin/
+│   │   ├── SKILL.md                 # principles, state files, phase routing, stop conditions
+│   │   ├── commands/
+│   │   │   └── anakin.md            # /anakin: one step per firing, pacing, arguments
+│   │   └── references/
+│   │       ├── knowledge.md         # init: discover GATE.md, learn KNOWLEDGE.md, mechanize boundaries
+│   │       ├── conceive.md          # interview-first spec flow, the one human gate
+│   │       ├── decompose.md         # spec → one-tick roadmap items, sizing and ordering
+│   │       └── tick.md              # recall → verify map → build → gate → review → persist
+│   └── vader/                       # parked: SKILL.md, commands/, references/, scripts/ (CLI + tests)
+└── extensions/
     └── vader/
-        ├── SKILL.md                 # the loop, two human gates, anti-decay lock, CLI surface
-        ├── commands/
-        │   └── vader.md             # the /vader tick driver for /loop
-        ├── references/
-        │   ├── protocol.md          # phases P-1 to P4, the tick, the gates
-        │   ├── constitution.md      # the four invariant kinds, worked examples, rawCheck escape
-        │   ├── acceptance-gate.md   # the verifier's five-pass refute-first gate
-        │   ├── adapters.md          # one spine, a thin edge per harness; planTick fan-out
-        │   └── recipes.md           # the Workflow script and the sequential fallback
-        └── scripts/
-            ├── vader.ts             # the factory CLI: init, gen, gate, recall, triage, persist, ratchet
-            ├── vader.test.ts        # behavior tests against real temp git repos
-            └── dogfood.test.ts      # end-to-end proof: a collapsed boundary fails the gate by id
+        ├── index.ts                 # Pi companion slash commands and TUI wizard
+        └── extension.test.ts        # behavior tests for prompt/status state
 ```
 
 The skills.sh CLI auto-discovers any directory under `skills/` that contains a `SKILL.md` with
