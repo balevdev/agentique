@@ -38,6 +38,49 @@ beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "anakin-home-"));
 });
 
+describe("gate / prefs / knowledge", () => {
+  test("gate set replaces, gate get returns in order", () => {
+    const repo = makeRepo();
+    run(["init", "--repo", repo]);
+    run(["gate", "set", "--repo", repo],
+      JSON.stringify([{ command: "bun test", reason: "unit tests" },
+                      { command: "bunx tsc --noEmit", reason: "types" }]));
+    let g = run(["gate", "get", "--repo", repo]).json();
+    expect(g.map((r: any) => r.command)).toEqual(["bun test", "bunx tsc --noEmit"]);
+    run(["gate", "set", "--repo", repo], JSON.stringify([{ command: "make check", reason: "" }]));
+    g = run(["gate", "get", "--repo", repo]).json();
+    expect(g).toHaveLength(1);
+  });
+
+  test("prefs are global and listable", () => {
+    run(["prefs", "set", "--key", "deps"], "stdlib before dependency; new deps need a one-line justification");
+    const p = run(["prefs", "list"]).json();
+    expect(p).toEqual([{ key: "deps", body: "stdlib before dependency; new deps need a one-line justification" }]);
+  });
+
+  test("knowledge set upserts by kind+title; stale detects commits under the glob", () => {
+    const repo = makeRepo();
+    run(["init", "--repo", repo]);
+    const sha = Bun.spawnSync(["git", "-C", repo, "rev-parse", "HEAD"]).stdout.toString().trim();
+    run(["knowledge", "set", "--repo", repo],
+      JSON.stringify({ kind: "layout", title: "root", body: "single module", paths_glob: "*.txt", verified_sha: sha }));
+    run(["knowledge", "set", "--repo", repo],
+      JSON.stringify({ kind: "layout", title: "root", body: "UPDATED", paths_glob: "*.txt", verified_sha: sha }));
+    const list = run(["knowledge", "list", "--repo", repo]).json();
+    expect(list).toHaveLength(1);
+    expect(list[0].body).toBe("UPDATED");
+
+    // nothing stale yet
+    expect(run(["knowledge", "stale", "--repo", repo, "--paths", "a.txt"]).json()).toHaveLength(0);
+
+    // a commit touching the glob makes it stale
+    writeFileSync(join(repo, "a.txt"), "changed\n");
+    Bun.spawnSync(["git", "-C", repo, "commit", "-aqm", "touch a"]);
+    const stale = run(["knowledge", "stale", "--repo", repo, "--paths", "a.txt"]).json();
+    expect(stale.map((s: any) => s.title)).toEqual(["root"]);
+  });
+});
+
 describe("init / project identity", () => {
   test("registers a project keyed by normalized origin URL", () => {
     const repo = makeRepo("git@github.com:acme/widget.git");
