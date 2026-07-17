@@ -93,6 +93,12 @@ function projectFor(db: Database, repo: string, createIfMissing = true): Project
   return db.query("SELECT * FROM projects WHERE id = ?").get(id) as Project;
 }
 
+function activeTask(db: Database, projectId: string): any | null {
+  return db.query(`SELECT * FROM tasks WHERE project_id = ?
+                   AND status IN ('approved','in_progress','review')
+                   ORDER BY id DESC LIMIT 1`).get(projectId) ?? null;
+}
+
 function globToRe(glob: string): RegExp {
   const esc = glob.trim()
     .replace(/[.+^${}()|[\]\\]/g, "\\$&")
@@ -134,6 +140,70 @@ async function main() {
       }
       return;
     }
+    case "task": {
+      if (!repo) die("task requires --repo <path>");
+      const db = openDb();
+      const p = projectFor(db, repo)!;
+      if (sub === "new") {
+        if (activeTask(db, p.id)) die("an active task already exists; close or commit it first (one task at a time)");
+        const t = await stdinJson();
+        try {
+          db.run("INSERT INTO tasks (project_id, title, description, mini_spec) VALUES (?,?,?,?)",
+            [p.id, t.title ?? "(untitled)", t.description ?? "", t.mini_spec ?? ""]);
+          out(db.query("SELECT * FROM tasks WHERE id = last_insert_rowid()").get());
+        } catch (e) { spool("task-new", { project: p.id, task: t, error: String(e) }); }
+      } else if (sub === "show") {
+        const row = argv.id
+          ? db.query("SELECT * FROM tasks WHERE id = ? AND project_id = ?").get(Number(argv.id), p.id)
+          : activeTask(db, p.id);
+        out(row ?? null);
+      } else if (sub === "approve") {
+        const id = Number(argv.id); if (!id) die("task approve requires --id");
+        const head = sh(p.abs_path, ["git", "-C", p.abs_path, "rev-parse", "HEAD"]);
+        try {
+          db.run("UPDATE tasks SET status = 'approved', baseline_sha = ?, updated_at = datetime('now') WHERE id = ? AND project_id = ?",
+            [head, id, p.id]);
+          out(db.query("SELECT * FROM tasks WHERE id = ?").get(id));
+        } catch (e) { spool("task-approve", { id, error: String(e) }); }
+      } else if (sub === "close") {
+        const id = Number(argv.id); if (!id) die("task close requires --id");
+        try {
+          db.run("UPDATE tasks SET status = 'review', updated_at = datetime('now') WHERE id = ? AND project_id = ?", [id, p.id]);
+          out(db.query("SELECT * FROM tasks WHERE id = ?").get(id));
+        } catch (e) { spool("task-close", { id, error: String(e) }); }
+      } else if (sub === "status") {
+        out({ project: p, active: activeTask(db, p.id) });
+      } else die("task new|show|approve|close|status");
+      return;
+    }
+
+    case "item": {
+      if (!repo) die("item requires --repo <path>");
+      const db = openDb();
+      const p = projectFor(db, repo)!;
+      if (sub === "add") {
+        const taskId = Number(argv.task); if (!taskId) die("item add requires --task <id>");
+        const it = await stdinJson();
+        try {
+          db.run(`INSERT INTO items (task_id, ordinal, title, files, done_when, contract, sensitive)
+                  VALUES (?,?,?,?,?,?,?)`,
+            [taskId, it.ordinal, it.title, it.files ?? "", it.done_when ?? "", it.contract ?? null, it.sensitive ?? null]);
+          out(db.query("SELECT * FROM items WHERE id = last_insert_rowid()").get());
+        } catch (e) { spool("item-add", { taskId, item: it, error: String(e) }); }
+      } else if (sub === "list") {
+        const taskId = Number(argv.task); if (!taskId) die("item list requires --task <id>");
+        out(db.query("SELECT * FROM items WHERE task_id = ? ORDER BY ordinal").all(taskId));
+      } else if (sub === "check") {
+        const id = Number(argv.id); if (!id) die("item check requires --id");
+        try {
+          db.run("UPDATE items SET status = 'done', journal_id = ? WHERE id = ?",
+            [argv.journal ? Number(argv.journal) : null, id]);
+          out(db.query("SELECT * FROM items WHERE id = ?").get(id));
+        } catch (e) { spool("item-check", { id, error: String(e) }); }
+      } else die("item add|list|check");
+      return;
+    }
+
     case "gate": {
       if (!repo) die("gate requires --repo <path>");
       const db = openDb();

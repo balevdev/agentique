@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS items (
   contract   TEXT,
   sensitive  TEXT,
   status     TEXT NOT NULL DEFAULT 'todo' CHECK (status IN ('todo','done')),
-  journal_id INTEGER REFERENCES journal(id)
+  journal_id INTEGER  -- soft pointer into journal; journal is append-only
 );
 
 CREATE TABLE IF NOT EXISTS knowledge_sections (

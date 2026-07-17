@@ -81,6 +81,46 @@ describe("gate / prefs / knowledge", () => {
   });
 });
 
+describe("task / item lifecycle", () => {
+  test("draft → approved (baseline recorded) → close → review; one active task enforced", () => {
+    const repo = makeRepo();
+    run(["init", "--repo", repo]);
+    const t = run(["task", "new", "--repo", repo],
+      JSON.stringify({ title: "Add greeting", description: "ticket text", mini_spec: "purpose..." })).json();
+    expect(t.status).toBe("draft");
+
+    run(["task", "approve", "--repo", repo, "--id", String(t.id)]);
+    const shown = run(["task", "show", "--repo", repo]).json();
+    expect(shown.status).toBe("approved");
+    expect(shown.baseline_sha).toHaveLength(40);
+
+    // second active task refused
+    const dup = run(["task", "new", "--repo", repo], JSON.stringify({ title: "Another" }));
+    expect(dup.code).not.toBe(0);
+
+    run(["task", "close", "--repo", repo, "--id", String(t.id)]);
+    expect(run(["task", "show", "--repo", repo, "--id", String(t.id)]).json().status).toBe("review");
+  });
+
+  test("items: add in order, check marks done and links journal id", () => {
+    const repo = makeRepo();
+    run(["init", "--repo", repo]);
+    const t = run(["task", "new", "--repo", repo], JSON.stringify({ title: "T" })).json();
+    run(["task", "approve", "--repo", repo, "--id", String(t.id)]);
+    const i1 = run(["item", "add", "--repo", repo, "--task", String(t.id)],
+      JSON.stringify({ ordinal: 1, title: "define contract", files: "src/api.ts", done_when: "type exported", contract: "type Greeting = {msg: string}" })).json();
+    run(["item", "add", "--repo", repo, "--task", String(t.id)],
+      JSON.stringify({ ordinal: 2, title: "use contract", files: "src/app.ts", done_when: "renders msg", sensitive: "public-api" }));
+    const list = run(["item", "list", "--repo", repo, "--task", String(t.id)]).json();
+    expect(list.map((i: any) => i.ordinal)).toEqual([1, 2]);
+
+    run(["item", "check", "--repo", repo, "--id", String(i1.id), "--journal", "99"]);
+    const after = run(["item", "list", "--repo", repo, "--task", String(t.id)]).json();
+    expect(after[0].status).toBe("done");
+    expect(after[0].journal_id).toBe(99);
+  });
+});
+
 describe("init / project identity", () => {
   test("registers a project keyed by normalized origin URL", () => {
     const repo = makeRepo("git@github.com:acme/widget.git");
