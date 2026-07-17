@@ -45,7 +45,9 @@ typecheck/lint/tests are the gate, and a red gate spawns zero reviewers); the ma
 builds; ask at intake, never mid-tick.
 
 Run it with `/anakin` driven by `/loop`. Memory access goes through
-`skills/anakin/scripts/anakin-db.ts` (bun, zero dependencies). See `skills/anakin/SKILL.md`;
+`skills/anakin/scripts/anakin-db.ts` (bun, zero dependencies), and a read-only local
+dashboard over the same DB ships with the skill (`/anakin dashboard` — live server on
+127.0.0.1 or a self-contained HTML snapshot). See `skills/anakin/SKILL.md`;
 design: `docs/superpowers/specs/2026-07-17-anakin-v2-sqlite-factory-design.md`.
 
 ## What vader is (parked)
@@ -144,7 +146,10 @@ agentique/
 │   │   └── scripts/
 │   │       ├── anakin-db.ts         # the memory CLI (bun:sqlite, zero deps)
 │   │       ├── schema.sql           # tables + FTS5
-│   │       └── anakin-db.test.ts    # bun test suite
+│   │       ├── anakin-db.test.ts    # bun test suite
+│   │       ├── dashboard.ts         # read-only observatory server + snapshot
+│   │       ├── dashboard/           # index.html, style.css, app.ts (no framework)
+│   │       └── dashboard.test.ts    # dashboard test suite
 │   └── vader/                       # parked: SKILL.md, commands/, references/, scripts/ (CLI + tests)
 └── extensions/
     └── vader/

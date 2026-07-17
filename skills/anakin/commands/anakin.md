@@ -33,3 +33,10 @@ runs, review notes) instead of a feature ask; same approval gate.
 journal tail, open questions. Read-only, no tick.
 `/anakin import` — migrate a legacy committed `.anakin/` directory into the
 DB, then remind the human to delete the folder and remove it from git.
+`/anakin dashboard` — start the read-only observatory: run
+`bun ../scripts/dashboard.ts --open` as a background process, then tell the
+human the URL and PID from its startup line
+(`anakin dashboard http://127.0.0.1:<port> pid <pid>`) and how to stop it
+(`kill <pid>`). Do not schedule wakeups for it; it is not a factory phase.
+`--snapshot <file>` instead writes a self-contained HTML snapshot for
+sharing. The dashboard opens the DB read-only and can never alter memory.

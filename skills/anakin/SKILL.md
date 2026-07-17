@@ -50,6 +50,10 @@ The subcommands: `init`, `recall` (the whole rehydration packet in one call),
 (cross-project). If a write fails, the CLI spools the payload to
 `~/.anakin/spool/` and exits non-zero — stop cleanly and tell the human.
 
+A read-only dashboard over the same DB ships with the skill
+(`scripts/dashboard.ts`; `/anakin dashboard`) — an observatory for the human,
+never a write path.
+
 ## Phase routing — by DB state
 
 Run `recall --repo .` once and route on its output:
