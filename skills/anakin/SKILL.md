@@ -1,91 +1,102 @@
 ---
 name: anakin
-description: Run the ANAKIN software factory — turn an approved spec or audit findings into shipped code through small autonomous ticks, one verified diff at a time. Use when the user asks for an anakin run, says "anakin init", wants a repo built or hardened autonomously via /loop, when a repo contains a .anakin/ directory, or when they want an idea taken from interview to spec to roadmap to a sequence of small gated commits without babysitting each one.
+description: Run the ANAKIN software factory — turn everyday engineering tasks (tickets, features, hardening) into reviewed diffs through small autonomous ticks, with all memory in a global SQLite database and zero traces in the repo. Use when the user asks for an anakin run, says "anakin init" or "anakin task", wants a repo built or hardened autonomously via /loop, or wants hands-off task-after-task work where the factory never commits and the human reviews each finished task.
 ---
 
 # ANAKIN — the minimal software factory
 
-Turn one approved spec into shipped code through small, verified, journaled diffs.
-One tick = one roadmap item = one reviewable commit. Between ticks the context is
-discarded; the committed `.anakin/` files are the only memory.
+Turn one approved task into one reviewed diff through small, verified,
+journaled ticks. One tick = one item = one verified diff. Between ticks the
+context is discarded; the global database at `~/.anakin/anakin.db` is the only
+memory. The target repo stays 100% clean: the factory creates no files in it
+and makes no commits — ever. The human reviews and commits each finished task.
 
 ## Operating principles
 
-These are the reasons behind every rule below. When a situation is not covered,
-decide by these, in this order:
+When a situation is not covered below, decide by these, in this order:
 
-1. **Context is finite.** A tick reads a bounded packet: this file, the reference
-   for the current phase, and the state files. Nothing else is loaded up front.
-   Anything else you need, you go read from the repo when the work demands it.
-2. **Knowledge is obtained, not imposed.** ANAKIN learns the repo's real
-   architecture into `KNOWLEDGE.md` and keeps it verified against commits. It does
-   not invent invariants or install a bespoke enforcement engine. A boundary worth
-   enforcing gets encoded in tools someone else maintains — a lint rule, a fallow
-   boundary, a real test — proposed as a roadmap item.
-3. **Determinism beats discipline.** The only thing that blocks a tick is the
-   repo's own toolchain, recorded in `GATE.md`. The gate runs before any LLM
-   review; a red gate spawns zero reviewers. Never weaken `GATE.md` to get past a
-   red — a gate you edited to pass proves nothing, so treat it as read-only during
-   a tick.
-4. **The main context builds.** You implement the roadmap item yourself. Subagents
-   are read-only scouts for unmapped territory, plus at most one reviewer for
-   sensitive diffs. No relay chains: a scout's report feeds your build, it never
-   carries the work.
-5. **Ask before spec, never mid-tick.** All human questions happen during conceive.
-   Mid-tick ambiguity is not a reason to stall or guess big: journal the question,
-   stop cleanly, let the human answer between ticks.
+1. **Context is finite.** A tick reads a bounded packet: this file, the
+   reference for the current phase, and one `recall` call. Anything else you
+   need, you go read from the repo when the work demands it.
+2. **The repo belongs to the human.** No factory files inside it, no factory
+   commits, no `git add`. Checkpoints are patches in the journal; the tree is
+   the shared workbench and dirty is its normal state.
+3. **Knowledge is obtained, not imposed.** ANAKIN learns the repo's real
+   architecture into `knowledge_sections` rows and keeps them verified against
+   commits. A boundary worth enforcing gets encoded in tools someone else
+   maintains — a lint rule, a fallow boundary, a real test — proposed as a
+   task item, never as a bespoke engine.
+4. **Determinism beats discipline.** The only thing that blocks a tick is the
+   repo's own toolchain, recorded in `gate_commands`. The gate runs before any
+   LLM review; a red gate spawns zero reviewers. Gate rows are read-only
+   during a tick — a gate you edited to pass proves nothing.
+5. **The main context builds.** Subagents are read-only scouts for unmapped
+   territory, plus at most one reviewer for sensitive diffs. No relay chains.
+6. **Ask at intake, never mid-tick.** Questions are cheap during intake and
+   poison mid-build. Mid-tick ambiguity is journaled and becomes a clean stop.
 
-## State files — `.anakin/`, committed
+## Memory — the database and its CLI
 
-| File | Contents | Who writes it |
-|---|---|---|
-| `KNOWLEDGE.md` | Architecture map learned from the repo: modules, boundaries, conventions, sensitive zones, gotchas. Sections stamped `verified: <commit>`. | ANAKIN, continuously |
-| `GATE.md` | The exact shell commands that are the gate (typecheck, lint, tests, fallow). | ANAKIN at init; humans thereafter |
-| `SPEC.md` | The approved spec. | ANAKIN drafts, human approves |
-| `ROADMAP.md` | Checkbox list of items, each sized for one tick. Features and hardening tasks intermixed. | ANAKIN, human-approved |
-| `JOURNAL.md` | Append-only tick log: item, gate verdict, decisions, open questions. | ANAKIN, one entry per tick |
+All memory lives in `~/.anakin/anakin.db` (every project, one file). The only
+read/write path is the CLI next to this skill:
 
-Humans may edit any of these between ticks; the files are the interface.
+    bun "<this skill's directory>/scripts/anakin-db.ts" <cmd> --repo .
 
-## Phase routing
+Prose goes through stdin (JSON) or `--patch-file`, never shell-quoted args.
+The subcommands: `init`, `recall` (the whole rehydration packet in one call),
+`task new|show|approve|close|status`, `item add|list|check`,
+`knowledge set|list|stale`, `gate get|set`, `prefs set|list`,
+`journal append`, `import` (legacy `.anakin/` folders), `status`
+(cross-project). If a write fails, the CLI spools the payload to
+`~/.anakin/spool/` and exits non-zero — stop cleanly and tell the human.
 
-Decide the phase from the state on disk, then read only that phase's reference:
+## Phase routing — by DB state
 
-- **No `.anakin/` directory** → initialize. Read `references/knowledge.md`.
-- **`.anakin/` exists but `SPEC.md` is missing or not approved** → conceive.
-  Read `references/conceive.md`; when the spec is agreed, `references/decompose.md`.
-- **Approved spec + `ROADMAP.md` with unchecked items** → tick.
-  Read `references/tick.md`. This is the steady state.
-- **All items checked** → report completion and stop; do not schedule another tick.
+Run `recall --repo .` once and route on its output:
 
-## Human gates and autonomy
+- **Project unknown / no gate commands** → init. Read `references/knowledge.md`.
+- **No active task** → intake. Read `references/task.md`. (A task submitted by
+  the human via `/anakin task <text>` starts here.)
+- **Active task with todo items** → tick. Read `references/tick.md`. Steady state.
+- **Active task, all items done** → close: run the full gate once on the whole
+  tree, write a reviewer-oriented summary of the combined diff (per-item map of
+  what changed and why), `task close`, journal it, stop for human review.
+- **Task in `review`** → the human hasn't committed yet. Stop with the same
+  ask. (When they commit, the next recall flips the task to `committed`
+  automatically.)
 
-Exactly one mandatory human gate: approval of `SPEC.md` + `ROADMAP.md` at the end
-of conceive. After that ANAKIN runs autonomously tick after tick, stopping itself
-only when:
+## Git behavior
 
-- the roadmap is exhausted,
-- the gate stays red after three distinct fix attempts,
-- an ambiguity or scope question needs the human (journaled first),
-- the repo has uncommitted human changes it did not make (never build on top of a
-  dirty tree you don't understand — ask).
+Never commit. Never stage. Each tick ends by journaling the cumulative task
+patch (`git diff <baseline_sha>`) plus `head_sha` and a hash of `git diff
+HEAD`, so every checkpoint is recoverable from the DB alone. Human edits to
+the tree mid-task are normal: reconcile them (see tick.md), never revert them.
 
-A stop is always clean: journal written, tree committed or untouched, the final
-message states exactly what is needed to resume.
+## Human touchpoints and autonomy
+
+Exactly two: approve the mini-spec + items at intake, and review/commit the
+combined diff when the task closes. Between them ANAKIN runs tick after tick,
+stopping itself only when: the task's items are exhausted (→ close), the gate
+stays red after three distinct fix attempts, an ambiguity needs the human
+(journaled first), human edits conflict with the current item, or the DB is
+unreachable (spool written). A stop is always clean: journal written, tree
+left as-is, final message states exactly what is needed to resume.
 
 ## Requirements
 
-- A git repo. Every tick ends in a commit; the journal references commits.
-- `/loop` (or any recurring driver) for autonomy. A single `/anakin` invocation
-  runs exactly one phase step or one tick and is useful on its own.
-- Optional, used when present: `repomap` (knowledge acquisition and impact
+- A git repo (identity, baselines, and patches all come from git).
+- `bun` (the CLI runs on it; no npm installs needed).
+- `/loop` (or any recurring driver) for autonomy; a single `/anakin` firing
+  runs one phase step and is useful on its own.
+- Optional, used when present: `repomap` (knowledge acquisition, impact
   queries), `fallow` (structural gate step). Degrade gracefully when absent.
 
 ## What ANAKIN deliberately does not have
 
 No constitution compiler, no fingerprint locks, no critic agents, no parallel
-worktree owners, no voter panels, no autonomy ratchets, no per-harness adapters.
-Its predecessor (vader) had all of these; they cost ~20 subagent dispatches and
-~13k instruction tokens per tick and lost information at every handoff. ANAKIN
-keeps the parts that earned their place — deterministic gate first, rehydrate
-don't re-derive, one item one diff, triaged stops — and deletes the rest.
+worktree owners, no voter panels, no autonomy ratchets, no per-harness
+adapters, no state files in the repo, no task queue. Its predecessor (vader)
+had the first seven; they cost ~20 subagent dispatches and ~13k instruction
+tokens per tick and lost information at every handoff. ANAKIN keeps what
+earned its place — deterministic gate first, rehydrate don't re-derive, one
+item one diff, triaged stops — and deletes the rest.

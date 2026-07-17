@@ -1,32 +1,35 @@
 ---
-description: Run one step of the ANAKIN software factory (init, conceive, or a single build tick) and self-pace with /loop
+description: Run one step of the ANAKIN software factory (init, task intake, or a single build tick) and self-pace with /loop
 ---
 
 # /anakin — one step per firing
 
-Read `../SKILL.md` first. Then decide the phase from `.anakin/` state on disk
-(phase routing in SKILL.md) and run exactly one step:
-
-- **init** → build `GATE.md` and `KNOWLEDGE.md` per `references/knowledge.md`, then stop.
-- **conceive** → interview, draft `SPEC.md` and `ROADMAP.md` per
-  `references/conceive.md` + `references/decompose.md`, then stop for approval.
-- **tick** → execute exactly one roadmap item per `references/tick.md`.
+Read `../SKILL.md` first. Locate the CLI at `../scripts/anakin-db.ts` relative
+to this file, run `recall --repo .`, and route by DB state (phase routing in
+SKILL.md). Run exactly one step: init, intake, one tick, or task close.
 
 ## Pacing
 
-- One tick per firing. Never batch two roadmap items into one firing, even small
-  ones — the fresh context per item is what keeps quality flat over long runs.
-- After a successful tick with unchecked items remaining: `ScheduleWakeup`
-  (60–120s; the state files carry everything forward, there is nothing to wait for).
-- On any stop condition from SKILL.md (roadmap done, red gate after three
-  attempts, journaled question, dirty tree): do not schedule. End with a message
-  stating what happened and what the human should do to resume.
+- One tick per firing. Never batch two items into one firing, even small ones —
+  the fresh context per item is what keeps quality flat over long runs.
+- After a successful tick with todo items remaining: `ScheduleWakeup` (60–120s;
+  the DB carries everything forward, there is nothing to wait for).
+- On any stop condition from SKILL.md (task closed for review, red gate after
+  three attempts, journaled question, conflicting human edits, spooled write):
+  do not schedule. End with a message stating what happened and what the human
+  should do to resume.
 
 ## Arguments
 
-`/anakin` — route by state, as above.
-`/anakin init` — force (re)initialization, refreshing GATE.md and KNOWLEDGE.md.
-`/anakin harden` — seed or extend ROADMAP.md from audit findings (fallow, gate
-runs, review notes) instead of a feature spec; still passes the approval gate.
-`/anakin status` — read the state files and report: next item, journal tail,
-open questions, gate health. Read-only, no tick.
+`/anakin` — route by DB state, as above.
+`/anakin init` — force (re)initialization: rediscover gate commands, refresh
+the knowledge map.
+`/anakin task <text>` — start intake with `<text>` as the ask (ticket text,
+bug report, or idea). Greenfield ideas get the fuller interview; see
+`references/task.md`.
+`/anakin harden` — seed a hardening task from audit findings (fallow, gate
+runs, review notes) instead of a feature ask; same approval gate.
+`/anakin status` — run the CLI `status` and `task status`, report next item,
+journal tail, open questions. Read-only, no tick.
+`/anakin import` — migrate a legacy committed `.anakin/` directory into the
+DB, then remind the human to delete the folder and remove it from git.
