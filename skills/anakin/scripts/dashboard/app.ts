@@ -122,9 +122,11 @@ async function render() {
   root.replaceChildren(renderRail(o, r), main);
 }
 
-// Task 3 replaces this stub with the real project views.
 async function renderProjectView(r: { view: string; pid: string | null }, p: Json): Promise<HTMLElement> {
-  return h("div", "card", h("p", "quiet", p.project.name));
+  if (r.view === "journal") return renderJournal(r.pid!, p);
+  if (r.view === "knowledge") return renderKnowledge(p);
+  if (r.view === "gate") return renderGate(p);
+  return renderProject(p);
 }
 
 async function poll() {
@@ -224,6 +226,195 @@ function renderOverview(o: Json): HTMLElement {
         h("div", "quiet", `${e.project_name} · ${timeAgo(e.created_at)}`))));
   if (!o.recent.length) rc.append(h("p", "quiet", "no activity yet"));
   v.append(rc);
+  return v;
+}
+
+// ---------- project views ----------
+
+function projectHeader(p: Json, active: string): HTMLElement {
+  const id = p.project.id;
+  const tabs = h("div", "tabs");
+  const spec: [string, string, string][] = [
+    ["task", `#/p/${id}`, "Task"],
+    ["journal", `#/p/${id}/journal`, "Journal"],
+    ["knowledge", `#/p/${id}/knowledge`, "Knowledge"],
+    ["gate", `#/p/${id}/gate`, "Gate & Prefs"],
+  ];
+  for (const [key, href, label] of spec)
+    tabs.append(link(href, `tab${active === key ? " active" : ""}`, label));
+  return h("header", "project-head",
+    h("h1", "", p.project.name),
+    h("div", "quiet mono", p.project.abs_path),
+    tabs);
+}
+
+function statusPill(status: string): HTMLElement {
+  return h("span", `pill ${status}`, status.replace("_", " "));
+}
+
+function renderProject(p: Json): HTMLElement {
+  const v = h("div", "view");
+  v.append(projectHeader(p, "task"));
+  if (!p.task) {
+    v.append(h("div", "card", h("p", "quiet", "no task yet — /anakin task <ticket> starts intake")));
+    return v;
+  }
+  const t = p.task;
+  const done = p.items.filter((i: Json) => i.status === "done").length;
+
+  const hero = h("div", "card hero");
+  hero.append(h("div", "hero-top", statusPill(t.status), h("span", "quiet", `updated ${timeAgo(t.updated_at)}`)));
+  hero.append(h("h2", "", t.title));
+  if (t.description) hero.append(h("p", "quiet", t.description));
+  const bar = h("div", "progress");
+  const fill = h("div", "progress-fill");
+  fill.style.width = p.items.length ? `${(done / p.items.length) * 100}%` : "0";
+  bar.append(fill);
+  hero.append(h("div", "hero-progress", bar, h("span", "mono quiet", `${done}/${p.items.length}`)));
+  hero.append(h("div", "quiet mono", p.expected_tree_hash
+    ? `tree ${short(p.expected_tree_hash)} · head ${short(p.expected_head_sha)}`
+    : "tree clean"));
+  v.append(hero);
+
+  const il = h("div", "card");
+  il.append(h("div", "card-title", "items"));
+  for (const i of p.items)
+    il.append(h("div", `item-row${i.status === "done" ? " done" : ""}`,
+      h("span", "item-mark", i.status === "done" ? "✓" : "○"),
+      h("div", "j-main", h("div", "", i.title), i.files ? h("div", "quiet mono", i.files) : null),
+      i.sensitive ? h("span", "badge outline", "sensitive") : null));
+  if (!p.items.length) il.append(h("p", "quiet", "no items yet"));
+  v.append(il);
+
+  const gc = h("div", "card");
+  gc.append(h("div", "card-title", "gate"));
+  for (const g of p.gate)
+    gc.append(h("div", "gate-row", h("code", "", g.command), g.reason ? h("span", "quiet", g.reason) : null));
+  if (!p.gate.length) gc.append(h("p", "quiet", "no gate commands recorded"));
+  const lastTick = p.journal.find((e: Json) => e.entry_kind === "tick");
+  if (lastTick?.gate_verdict)
+    gc.append(h("div", "gate-verdict quiet", "last verdict ", kindBadge("tick", lastTick.gate_verdict)));
+  v.append(gc);
+
+  const jc = h("div", "card");
+  jc.append(h("div", "card-title", "latest activity"));
+  for (const e of p.journal.slice(0, 5)) jc.append(journalRow(e));
+  if (!p.journal.length) jc.append(h("p", "quiet", "quiet so far"));
+  v.append(jc);
+  return v;
+}
+
+function renderDiff(patch: string): HTMLElement {
+  const box = h("div", "diff");
+  for (const line of patch.split("\n")) {
+    const cls = line.startsWith("+") ? "add" : line.startsWith("-") ? "del"
+      : line.startsWith("@@") ? "hunk" : "";
+    box.append(h("div", `dline ${cls}`, line || " "));
+  }
+  return box;
+}
+
+function journalRow(e: Json): HTMLElement {
+  const row = h("div", "j-entry");
+  const head = h("div", "j-head",
+    kindBadge(e.entry_kind, e.gate_verdict),
+    h("div", "j-main",
+      h("div", "", e.item_title ?? (e.decisions ? e.decisions.split("\n")[0] : e.entry_kind)),
+      h("div", "quiet", timeAgo(e.created_at))));
+  const body = h("div", "j-body");
+  if (e.decisions) body.append(h("pre", "", e.decisions));
+  if (e.questions) body.append(h("div", "q-block", h("div", "card-title", "questions"), h("pre", "", e.questions)));
+  if (e.tree_hash) body.append(h("div", "quiet mono", `tree ${short(e.tree_hash)} · head ${short(e.head_sha)}`));
+  if (e.has_patch) {
+    const btn = h("button", "btn", "view patch");
+    (btn as HTMLButtonElement).onclick = async () => {
+      btn.replaceWith(renderDiff(await apiText(`/api/patch/${e.id}`)));
+    };
+    body.append(btn);
+  }
+  body.hidden = true;
+  head.onclick = () => { body.hidden = !body.hidden; };
+  row.append(head, body);
+  return row;
+}
+
+async function renderJournal(pid: string, p: Json): Promise<HTMLElement> {
+  const v = h("div", "view");
+  v.append(projectHeader(p, "journal"));
+  const search = h("input", "search") as HTMLInputElement;
+  search.placeholder = "search memory…";
+  const select = h("select", "kind-select") as HTMLSelectElement;
+  for (const k of ["all", "tick", "approval", "stop", "note"]) {
+    const opt = document.createElement("option");
+    opt.value = k === "all" ? "" : k;
+    opt.textContent = k;
+    select.append(opt);
+  }
+  v.append(h("div", "toolbar", search, select));
+  const list = h("div", "j-list");
+  const more = h("button", "btn more", "older entries");
+  v.append(list, more);
+
+  let before: number | null = null;
+  async function load(reset: boolean) {
+    if (reset) { list.replaceChildren(); before = null; }
+    const qs = new URLSearchParams();
+    if (search.value.trim()) qs.set("q", search.value.trim());
+    if (select.value) qs.set("kind", select.value);
+    if (before) qs.set("before", String(before));
+    const page = await api(`/api/journal/${pid}?${qs}`);
+    for (const e of page.entries) list.append(journalRow(e));
+    if (!list.children.length) list.append(h("p", "quiet", "nothing here"));
+    before = page.next_before;
+    more.hidden = !before;
+  }
+  let deb: ReturnType<typeof setTimeout>;
+  search.oninput = () => { clearTimeout(deb); deb = setTimeout(() => load(true), 250); };
+  select.onchange = () => load(true);
+  (more as HTMLButtonElement).onclick = () => load(false);
+  await load(true);
+  return v;
+}
+
+const KINDS = ["layout", "boundary", "convention", "sensitive_zone", "gotcha"];
+
+function renderKnowledge(p: Json): HTMLElement {
+  const v = h("div", "view");
+  v.append(projectHeader(p, "knowledge"));
+  if (!p.knowledge.length) v.append(h("div", "card", h("p", "quiet", "no knowledge recorded yet")));
+  for (const kind of KINDS) {
+    const secs = p.knowledge.filter((k: Json) => k.kind === kind);
+    if (!secs.length) continue;
+    const c = h("div", "card");
+    c.append(h("div", "card-title", kind.replace("_", " ")));
+    for (const s of secs)
+      c.append(h("div", "k-row",
+        h("div", "k-head", h("strong", "", s.title),
+          h("span", "quiet mono", `${s.paths_glob || "*"} · ${short(s.verified_sha)} · ${timeAgo(s.updated_at)}`)),
+        h("pre", "k-body", s.body)));
+    v.append(c);
+  }
+  return v;
+}
+
+function renderGate(p: Json): HTMLElement {
+  const v = h("div", "view");
+  v.append(projectHeader(p, "gate"));
+  const gc = h("div", "card");
+  gc.append(h("div", "card-title", "gate — runs in order, every tick"));
+  p.gate.forEach((g: Json, i: number) =>
+    gc.append(h("div", "gate-row",
+      h("span", "quiet mono", String(i + 1)),
+      h("code", "", g.command),
+      g.reason ? h("span", "quiet", g.reason) : null)));
+  if (!p.gate.length) gc.append(h("p", "quiet", "no gate commands recorded"));
+  v.append(gc);
+  const pc = h("div", "card");
+  pc.append(h("div", "card-title", "prefs — global"));
+  for (const pref of p.prefs)
+    pc.append(h("div", "k-row", h("div", "k-head", h("strong", "", pref.key)), h("pre", "k-body", pref.body)));
+  if (!p.prefs.length) pc.append(h("p", "quiet", "no prefs set"));
+  v.append(pc);
   return v;
 }
 

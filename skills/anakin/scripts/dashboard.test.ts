@@ -201,3 +201,15 @@ describe("dashboard ui assets", () => {
     } finally { d.stop(); }
   });
 });
+
+describe("dashboard views", () => {
+  test("built app contains all view renderers and the diff viewer", async () => {
+    seed();
+    const d = await startDash();
+    try {
+      const js = await (await fetch(`${d.base}/app.js`)).text();
+      for (const fn of ["renderProject", "renderJournal", "renderKnowledge", "renderGate", "renderDiff"])
+        expect(js).toContain(fn);
+    } finally { d.stop(); }
+  });
+});
