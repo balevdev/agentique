@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, chmodSync, rmSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -118,6 +118,47 @@ describe("task / item lifecycle", () => {
     const after = run(["item", "list", "--repo", repo, "--task", String(t.id)]).json();
     expect(after[0].status).toBe("done");
     expect(after[0].journal_id).toBe(99);
+  });
+});
+
+describe("journal", () => {
+  test("append stores entry + patch and indexes FTS", () => {
+    const repo = makeRepo();
+    run(["init", "--repo", repo]);
+    const t = run(["task", "new", "--repo", repo], JSON.stringify({ title: "T" })).json();
+    run(["task", "approve", "--repo", repo, "--id", String(t.id)]);
+    const it = run(["item", "add", "--repo", repo, "--task", String(t.id)],
+      JSON.stringify({ ordinal: 1, title: "wire the flux capacitor", files: "src/flux.ts", done_when: "green" })).json();
+
+    const patchFile = join(home, "p.diff");
+    writeFileSync(patchFile, "diff --git a/src/flux.ts b/src/flux.ts\n+capacitor\n");
+    const r = run(["journal", "append", "--repo", repo, "--patch-file", patchFile],
+      JSON.stringify({ task_id: t.id, item_id: it.id, entry_kind: "tick", gate_verdict: "green",
+        decisions: "used polling because webhooks flaked", questions: "", head_sha: "a".repeat(40), tree_hash: "h1" }));
+    expect(r.code).toBe(0);
+    const entry = r.json();
+    expect(entry.id).toBeGreaterThan(0);
+    expect(entry.patch).toContain("capacitor");
+    // a tick entry moves an approved task to in_progress
+    expect(run(["task", "show", "--repo", repo]).json().status).toBe("in_progress");
+  });
+
+  test("write failure spools the payload and exits non-zero", () => {
+    const repo = makeRepo();
+    run(["init", "--repo", repo]);
+    // make the DB unopenable for writes; spool dir stays writable
+    rmSync(join(home, "anakin.db-wal"), { force: true });
+    rmSync(join(home, "anakin.db-shm"), { force: true });
+    chmodSync(join(home, "anakin.db"), 0o444);
+    const r = run(["journal", "append", "--repo", repo],
+      JSON.stringify({ entry_kind: "note", decisions: "must not be lost" }));
+    chmodSync(join(home, "anakin.db"), 0o644);
+    expect(r.code).not.toBe(0);
+    expect(r.err).toContain("spooled");
+    const spooled = readdirSync(join(home, "spool"));
+    expect(spooled.length).toBe(1);
+    const payload = JSON.parse(readFileSync(join(home, "spool", spooled[0]), "utf8"));
+    expect(JSON.stringify(payload)).toContain("must not be lost");
   });
 });
 

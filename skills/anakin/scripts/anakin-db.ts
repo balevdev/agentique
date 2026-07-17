@@ -267,6 +267,40 @@ async function main() {
       return;
     }
 
+    case "journal": {
+      if (!repo) die("journal requires --repo <path>");
+      if (sub !== "append") die("journal append");
+      const entry = await stdinJson();
+      const patch = argv["patch-file"] ? readFileSync(String(argv["patch-file"]), "utf8") : null;
+      try {
+        const db = openDb();
+        const p = projectFor(db, repo)!;
+        const itemTitle = entry.item_id
+          ? ((db.query("SELECT title FROM items WHERE id = ?").get(entry.item_id) as any)?.title ?? "")
+          : "";
+        let row: any;
+        db.transaction(() => {
+          db.run(`INSERT INTO journal (project_id, task_id, item_id, entry_kind, gate_verdict,
+                    decisions, questions, patch, head_sha, tree_hash)
+                  VALUES (?,?,?,?,?,?,?,?,?,?)`,
+            [p.id, entry.task_id ?? null, entry.item_id ?? null, entry.entry_kind,
+             entry.gate_verdict ?? null, entry.decisions ?? "", entry.questions ?? "",
+             patch, entry.head_sha ?? null, entry.tree_hash ?? null]);
+          row = db.query("SELECT * FROM journal WHERE id = last_insert_rowid()").get();
+          db.run("INSERT INTO journal_fts (rowid, decisions, questions, item_title) VALUES (?,?,?,?)",
+            [row.id, entry.decisions ?? "", entry.questions ?? "", itemTitle]);
+          if (entry.entry_kind === "tick" && entry.task_id) {
+            db.run("UPDATE tasks SET status = 'in_progress', updated_at = datetime('now') WHERE id = ? AND status = 'approved'",
+              [entry.task_id]);
+          }
+        })();
+        out(row);
+      } catch (e) {
+        spool("journal-append", { repo, entry, patch, error: String(e) });
+      }
+      return;
+    }
+
     default:
       die(`unknown command: ${cmd ?? "(none)"}`);
   }
