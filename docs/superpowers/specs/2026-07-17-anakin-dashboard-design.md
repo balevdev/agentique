@@ -96,8 +96,9 @@ Unknown routes → 404 JSON `{error}`. Any handler error → 500 JSON `{error}`
 - All DB-sourced strings reach the DOM via `textContent` (or equivalent
   escaping in the snapshot path). Journal entries and patches contain
   arbitrary code and must never be interpreted as HTML.
-- `:id` route params validated as `/^\d+$/` before touching SQL (parameterized
-  queries regardless).
+- Route params validated before touching SQL (parameterized queries
+  regardless): project ids as `/^[a-f0-9]{16}$/` (they are `hash16` strings),
+  journal ids as `/^\d+$/`.
 
 ## Visual system
 
