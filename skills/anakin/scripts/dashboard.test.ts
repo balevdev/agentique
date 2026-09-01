@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach } from "bun:test";
-import { mkdtempSync, writeFileSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, existsSync, readFileSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
@@ -86,8 +86,6 @@ describe("dashboard api", () => {
       expect(o.projects).toHaveLength(1);
       expect(o.projects[0].id).toBe(project.id);
       expect(o.projects[0].active_task).toBe("Wire flux");
-      expect(o.projects[0].items_done).toBe(1);
-      expect(o.projects[0].items_total).toBe(2);
       expect(o.totals.ticks_7d).toBe(1);
       expect(o.totals.tasks_by_status.in_progress).toBe(1);
       expect(o.totals.open_questions).toBe(1);
@@ -113,6 +111,33 @@ describe("dashboard api", () => {
       expect(p.journal[0].entry_kind).toBe("note");
       expect(p.journal[0].has_patch).toBe(0);
       expect(p.journal[1].has_patch).toBe(1);
+    } finally { d.stop(); }
+  });
+
+  test("project payload carries missions with handoffs and ingested artifacts", async () => {
+    const { repo, project, task } = seed();
+    const m = run(["mission", "open", "--repo", repo],
+      JSON.stringify({ task_id: task.id, slug: "flux", stage_plan: ["implement", "gate", "verify"],
+        dir: ".troopers/2026-09-01-flux" })).json();
+    run(["mission", "stage", "--repo", repo],
+      JSON.stringify({ mission_id: m.id, stage: "implement", attempt: 1, verdict: "OK", content: "## Handoff\nbuilt" }));
+    const dir = join(repo, ".troopers", "2026-09-01-flux");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "03-implement.md"), "# implement\nwired the flux capacitor");
+    run(["mission", "ingest", "--repo", repo, "--dir", ".troopers/2026-09-01-flux"]);
+    const d = await startDash();
+    try {
+      const p = await (await fetch(`${d.base}/api/project/${project.id}`)).json();
+      expect(p.missions).toHaveLength(1);
+      expect(p.missions[0].slug).toBe("flux");
+      expect(p.missions[0].stage_plan).toEqual(["implement", "gate", "verify"]);
+      expect(p.missions[0].stage_cursor).toBe(1);
+      expect(p.missions[0].task_title).toBe("Wire flux");
+      expect(p.missions[0].handoffs).toHaveLength(1);
+      expect(p.missions[0].handoffs[0].content).toContain("built");
+      expect(p.missions[0].artifacts).toHaveLength(1);
+      expect(p.missions[0].artifacts[0].filename).toBe("03-implement.md");
+      expect(p.missions[0].artifacts[0].bytes).toBeGreaterThan(0);
     } finally { d.stop(); }
   });
 
@@ -208,7 +233,7 @@ describe("dashboard views", () => {
     const d = await startDash();
     try {
       const js = await (await fetch(`${d.base}/app.js`)).text();
-      for (const fn of ["renderProject", "renderJournal", "renderKnowledge", "renderGate", "renderDiff"])
+      for (const fn of ["renderProject", "renderMissions", "renderJournal", "renderKnowledge", "renderGate", "renderDiff"])
         expect(js).toContain(fn);
     } finally { d.stop(); }
   });
@@ -250,8 +275,6 @@ describe("snapshot", () => {
   });
 });
 
-import { mkdirSync, rmSync } from "node:fs";
-
 describe("review fixes", () => {
   test("version seq moves for prefs, gate, knowledge body, and new projects", async () => {
     const { repo } = seed();
@@ -273,6 +296,11 @@ describe("review fixes", () => {
       run(["init", "--repo", repo2]);
       const v4 = await get();
       expect(v4).not.toBe(v3);
+      // a status flip landing in the same second as the prior write still
+      // moves the seq — the digest reads content, not just count+timestamp
+      run(["task", "close", "--repo", repo, "--id", "1"]);
+      const v5 = await get();
+      expect(v5).not.toBe(v4);
     } finally { d.stop(); }
   });
 

@@ -11,7 +11,6 @@ function snapLookup(path: string): Json {
   const [p, qs] = path.split("?");
   const params = new URLSearchParams(qs ?? "");
   if (p === "/api/overview") return SNAP.overview;
-  if (p === "/api/version") return { seq: "snapshot" };
   let m = p.match(/^\/api\/project\/(\w+)$/);
   if (m) return SNAP.projects[m[1]] ?? null;
   m = p.match(/^\/api\/journal\/(\w+)$/);
@@ -123,6 +122,7 @@ async function render() {
 }
 
 async function renderProjectView(r: { view: string; pid: string | null }, p: Json): Promise<HTMLElement> {
+  if (r.view === "missions") return renderMissions(p);
   if (r.view === "journal") return renderJournal(r.pid!, p);
   if (r.view === "knowledge") return renderKnowledge(p);
   if (r.view === "gate") return renderGate(p);
@@ -130,8 +130,10 @@ async function renderProjectView(r: { view: string; pid: string | null }, p: Jso
 }
 
 async function poll() {
-  // Don't yank the DOM out from under someone typing in a filter.
-  if (!(document.activeElement instanceof HTMLInputElement)) {
+  // Don't yank the DOM out from under someone typing in a filter or
+  // holding the kind dropdown open.
+  if (!(document.activeElement instanceof HTMLInputElement ||
+        document.activeElement instanceof HTMLSelectElement)) {
     try {
       const v = await api("/api/version");
       if (v.seq !== seq) { seq = v.seq; await render(); }
@@ -194,16 +196,14 @@ function renderOverview(o: Json): HTMLElement {
   v.append(h("h1", "", "Overview"));
   const t = o.totals;
   const active = (t.tasks_by_status.approved ?? 0) + (t.tasks_by_status.in_progress ?? 0) + (t.tasks_by_status.review ?? 0);
-  const done = o.projects.reduce((a: number, p: Json) => a + p.items_done, 0);
-  const total = o.projects.reduce((a: number, p: Json) => a + p.items_total, 0);
   v.append(h("div", "stat-grid",
-    stat("ticks · 7 days", t.ticks_7d),
-    stat("items done", `${done}/${total}`),
+    stat("checkpoints · 7 days", t.ticks_7d),
+    stat("tasks committed", t.tasks_by_status.committed ?? 0),
     stat("open questions", t.open_questions),
     stat("active tasks", active)));
 
   const sc = h("div", "card");
-  sc.append(h("div", "card-title", "ticks · last 30 days"), sparkline(t.ticks_30d_by_day));
+  sc.append(h("div", "card-title", "checkpoints · last 30 days"), sparkline(t.ticks_30d_by_day));
   v.append(sc);
 
   if (o.questions.length) {
@@ -236,6 +236,7 @@ function projectHeader(p: Json, active: string): HTMLElement {
   const tabs = h("div", "tabs");
   const spec: [string, string, string][] = [
     ["task", `#/p/${id}`, "Task"],
+    ["missions", `#/p/${id}/missions`, "Missions"],
     ["journal", `#/p/${id}/journal`, "Journal"],
     ["knowledge", `#/p/${id}/knowledge`, "Knowledge"],
     ["gate", `#/p/${id}/gate`, "Gate & Prefs"],
@@ -260,7 +261,12 @@ function renderProject(p: Json): HTMLElement {
     return v;
   }
   const t = p.task;
-  const done = p.items.filter((i: Json) => i.status === "done").length;
+  // v2 tasks carry no items — progress falls back to the latest mission's stages.
+  const mission = (p.missions ?? []).find((m: Json) => m.task_id === t.id) ?? null;
+  const total = p.items.length || (mission ? mission.stage_plan.length : 0);
+  const done = p.items.length
+    ? p.items.filter((i: Json) => i.status === "done").length
+    : mission ? Math.min(mission.stage_cursor, mission.stage_plan.length) : 0;
 
   const hero = h("div", "card hero");
   hero.append(h("div", "hero-top", statusPill(t.status), h("span", "quiet", `updated ${timeAgo(t.updated_at)}`)));
@@ -268,9 +274,10 @@ function renderProject(p: Json): HTMLElement {
   if (t.description) hero.append(h("p", "quiet", t.description));
   const bar = h("div", "progress");
   const fill = h("div", "progress-fill");
-  fill.style.width = p.items.length ? `${(done / p.items.length) * 100}%` : "0";
+  fill.style.width = total ? `${(done / total) * 100}%` : "0";
   bar.append(fill);
-  hero.append(h("div", "hero-progress", bar, h("span", "mono quiet", `${done}/${p.items.length}`)));
+  hero.append(h("div", "hero-progress", bar,
+    h("span", "mono quiet", `${done}/${total}${!p.items.length && mission ? " stages" : ""}`)));
   hero.append(h("div", "quiet mono", p.expected_tree_hash
     ? `tree ${short(p.expected_tree_hash)} · head ${short(p.expected_head_sha)}`
     : "tree clean"));
@@ -376,6 +383,56 @@ async function renderJournal(pid: string, p: Json): Promise<HTMLElement> {
   return v;
 }
 
+function stagePlanRow(m: Json): HTMLElement {
+  const row = h("div", "stage-plan mono");
+  (m.stage_plan as string[]).forEach((stage, i) => {
+    if (i) row.append(h("span", "quiet", " → "));
+    const mark = i < m.stage_cursor ? "✓ " : m.status === "running" && i === m.stage_cursor ? "▸ " : "○ ";
+    row.append(h("span", `stage${i < m.stage_cursor ? " done" : ""}`, mark + stage));
+  });
+  return row;
+}
+
+function handoffRow(hf: Json): HTMLElement {
+  const row = h("div", "j-entry");
+  const head = h("div", "j-head",
+    h("span", `badge${/^\s*(fail|block|red)\b/i.test(hf.verdict ?? "") ? " fail" : ""}`, // same leading-token rule as the CLI's cursor hold
+      `${hf.stage}${hf.attempt > 1 ? " #" + hf.attempt : ""}`),
+    h("div", "j-main",
+      h("div", "", hf.verdict ?? hf.content.split("\n")[0]),
+      h("div", "quiet", timeAgo(hf.created_at))));
+  const body = h("div", "j-body", h("pre", "", hf.content));
+  body.hidden = true;
+  head.onclick = () => { body.hidden = !body.hidden; };
+  row.append(head, body);
+  return row;
+}
+
+function renderMissions(p: Json): HTMLElement {
+  const v = h("div", "view");
+  v.append(projectHeader(p, "missions"));
+  if (!(p.missions ?? []).length)
+    v.append(h("div", "card", h("p", "quiet", "no missions yet — an approved task starts one")));
+  for (const m of p.missions ?? []) {
+    const c = h("div", "card");
+    c.append(h("div", "hero-top", statusPill(m.status),
+      h("span", "quiet", `${m.task_title} · updated ${timeAgo(m.updated_at)}`)));
+    c.append(h("h2", "", m.slug), h("div", "quiet mono", m.dir));
+    c.append(stagePlanRow(m));
+    if (m.handoffs.length) {
+      c.append(h("div", "card-title", "handoffs"));
+      for (const hf of m.handoffs) c.append(handoffRow(hf));
+    }
+    if (m.artifacts.length) {
+      c.append(h("div", "card-title", "ingested artifacts"));
+      for (const a of m.artifacts)
+        c.append(h("div", "gate-row", h("code", "", a.filename), h("span", "quiet", `${a.bytes} bytes`)));
+    }
+    v.append(c);
+  }
+  return v;
+}
+
 const KINDS = ["layout", "boundary", "convention", "sensitive_zone", "gotcha"];
 
 function renderKnowledge(p: Json): HTMLElement {
@@ -401,7 +458,7 @@ function renderGate(p: Json): HTMLElement {
   const v = h("div", "view");
   v.append(projectHeader(p, "gate"));
   const gc = h("div", "card");
-  gc.append(h("div", "card-title", "gate — runs in order, every tick"));
+  gc.append(h("div", "card-title", "gate — runs in order, after implement, before verify"));
   p.gate.forEach((g: Json, i: number) =>
     gc.append(h("div", "gate-row",
       h("span", "quiet mono", String(i + 1)),

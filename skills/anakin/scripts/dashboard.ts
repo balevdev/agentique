@@ -38,6 +38,12 @@ function openDb(): Database | null {
 
 // ---------- queries ----------
 
+// A DB that only ever met the v1 CLI has no mission tables; the dashboard is
+// read-only and must not create them, so every mission query checks first.
+function hasTable(db: Database, name: string): boolean {
+  return !!db.query("SELECT 1 FROM sqlite_master WHERE name = ?").get(name);
+}
+
 // Questions count as "waiting on you" only while their task is active —
 // task-less or committed-task questions would otherwise accrete forever
 // (the journal is append-only; nothing could ever clear them).
@@ -49,9 +55,6 @@ function overview(db: Database | null) {
   const projects = db.query(`
     SELECT p.id, p.name, p.abs_path, p.origin_url,
       (SELECT title  FROM tasks WHERE project_id = p.id AND status IN ('approved','in_progress','review') ORDER BY id DESC LIMIT 1) AS active_task,
-      (SELECT status FROM tasks WHERE project_id = p.id AND status IN ('approved','in_progress','review') ORDER BY id DESC LIMIT 1) AS active_status,
-      (SELECT COUNT(*) FROM items i JOIN tasks t ON i.task_id = t.id WHERE t.project_id = p.id AND i.status = 'done') AS items_done,
-      (SELECT COUNT(*) FROM items i JOIN tasks t ON i.task_id = t.id WHERE t.project_id = p.id) AS items_total,
       (SELECT MAX(created_at) FROM journal WHERE project_id = p.id) AS last_activity
     FROM projects p
     ORDER BY last_activity IS NULL, last_activity DESC`).all();
@@ -61,8 +64,10 @@ function overview(db: Database | null) {
   const totals = {
     projects: projects.length,
     tasks_by_status: tasksByStatus,
-    ticks_7d: (db.query("SELECT COUNT(*) AS c FROM journal WHERE entry_kind = 'tick' AND created_at >= datetime('now','-7 days')").get() as any).c,
-    ticks_30d_by_day: db.query("SELECT date(created_at) AS d, COUNT(*) AS c FROM journal WHERE entry_kind = 'tick' AND created_at >= datetime('now','-30 days') GROUP BY d ORDER BY d").all(),
+    // Velocity = entries that recorded the tree: v1 ticks and v2 mission
+    // checkpoints/closes alike, so the curve stays monotone across eras.
+    ticks_7d: (db.query("SELECT COUNT(*) AS c FROM journal WHERE tree_hash IS NOT NULL AND created_at >= datetime('now','-7 days')").get() as any).c,
+    ticks_30d_by_day: db.query("SELECT date(created_at) AS d, COUNT(*) AS c FROM journal WHERE tree_hash IS NOT NULL AND created_at >= datetime('now','-30 days') GROUP BY d ORDER BY d").all(),
     open_questions: (db.query(`SELECT COUNT(*) AS c FROM journal j
       JOIN tasks t ON t.id = j.task_id WHERE ${OPEN_Q_WHERE}`).get() as any).c,
   };
@@ -121,14 +126,24 @@ function projectPayload(db: Database | null, id: string) {
   const items = task
     ? db.query("SELECT * FROM items WHERE task_id = ? ORDER BY ordinal").all((task as any).id) : [];
   const lastTick: any = task
-    ? db.query("SELECT head_sha, tree_hash FROM journal WHERE task_id = ? AND entry_kind = 'tick' ORDER BY id DESC LIMIT 1").get((task as any).id)
+    ? db.query("SELECT head_sha, tree_hash FROM journal WHERE task_id = ? AND tree_hash IS NOT NULL ORDER BY id DESC LIMIT 1").get((task as any).id)
     : null;
+  const missions = hasTable(db, "missions")
+    ? (db.query(`SELECT m.*, t.title AS task_title FROM missions m JOIN tasks t ON t.id = m.task_id
+                 WHERE t.project_id = ? ORDER BY m.id DESC`).all(id) as any[]).map((m) => ({
+        ...m,
+        stage_plan: JSON.parse(m.stage_plan),
+        handoffs: db.query(`SELECT id, stage, attempt, verdict, content, created_at
+                            FROM handoffs WHERE mission_id = ? ORDER BY id`).all(m.id),
+        artifacts: db.query(`SELECT id, filename, length(body) AS bytes, created_at
+                             FROM artifacts WHERE mission_id = ? ORDER BY filename`).all(m.id),
+      }))
+    : [];
   return {
-    project, task, items,
+    project, task, items, missions,
     gate: db.query("SELECT ordinal, command, reason FROM gate_commands WHERE project_id = ? ORDER BY ordinal").all(id),
     knowledge: db.query("SELECT * FROM knowledge_sections WHERE project_id = ? ORDER BY kind, title").all(id),
     prefs: db.query("SELECT key, body FROM prefs ORDER BY key").all(),
-    tasks_all: db.query("SELECT id, title, status, created_at FROM tasks WHERE project_id = ? ORDER BY id DESC").all(id),
     expected_head_sha: lastTick?.head_sha ?? null,
     expected_tree_hash: lastTick?.tree_hash ?? null,
     journal: journalPage(db, id, {}).entries,
@@ -136,23 +151,36 @@ function projectPayload(db: Database | null, id: string) {
 }
 
 // The seq must move for ANY visible change — including tables with no
-// timestamps (gate_commands, prefs), body-only knowledge upserts, and new
-// projects — so it digests content, not just counts.
+// timestamps (gate_commands, prefs), body-only knowledge upserts, new
+// projects, and status/cursor flips landing in the same second as the write
+// before them (datetime('now') is second-granular) — so it digests content,
+// not just counts and timestamps. Journal/handoffs/artifacts are append-only,
+// so MAX(id) suffices for the big tables.
 function version(db: Database | null) {
   if (!db) return { seq: "empty" };
   const parts = db.query(`SELECT
       (SELECT COALESCE(MAX(id), 0) FROM journal) AS j,
-      (SELECT COUNT(*) || '-' || COALESCE(MAX(updated_at), '') FROM tasks) AS t,
+      (SELECT COALESCE(GROUP_CONCAT(x), '') FROM
+        (SELECT id || ':' || status || ':' || updated_at AS x FROM tasks ORDER BY id)) AS t,
       (SELECT COUNT(*) || '-' || COALESCE(SUM(CASE status WHEN 'done' THEN 1 ELSE 0 END), 0) FROM items) AS i,
       (SELECT COUNT(*) || '-' || COALESCE(MAX(updated_at), '') || '-' ||
               COALESCE(SUM(length(body) + length(paths_glob)), 0) FROM knowledge_sections) AS k,
-      (SELECT COUNT(*) FROM projects) AS p,
+      (SELECT COALESCE(GROUP_CONCAT(x), '') FROM
+        (SELECT id || ':' || abs_path || ':' || name AS x FROM projects ORDER BY id)) AS p,
       (SELECT COALESCE(GROUP_CONCAT(x), '') FROM
         (SELECT project_id || ':' || ordinal || ':' || command || ':' || reason AS x
          FROM gate_commands ORDER BY project_id, ordinal)) AS g,
       (SELECT COALESCE(GROUP_CONCAT(x), '') FROM
         (SELECT key || ':' || body AS x FROM prefs ORDER BY key)) AS pr`).get();
-  return { seq: createHash("sha256").update(JSON.stringify(parts)).digest("hex").slice(0, 16) };
+  const missions = hasTable(db, "missions")
+    ? db.query(`SELECT
+        (SELECT COALESCE(GROUP_CONCAT(x), '') FROM
+          (SELECT id || ':' || status || ':' || stage_cursor || ':' || updated_at AS x
+           FROM missions ORDER BY id)) AS m,
+        (SELECT COALESCE(MAX(id), 0) FROM handoffs) AS h,
+        (SELECT COALESCE(MAX(id), 0) FROM artifacts) AS a`).get()
+    : null;
+  return { seq: createHash("sha256").update(JSON.stringify([parts, missions])).digest("hex").slice(0, 16) };
 }
 
 // ---------- http ----------

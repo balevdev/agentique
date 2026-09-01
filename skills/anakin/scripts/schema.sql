@@ -60,6 +60,8 @@ CREATE TABLE IF NOT EXISTS journal (
   created_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Contentless is safe here only because the journal is append-only: rows are
+-- never deleted or updated, so no stale rowids can accumulate.
 CREATE VIRTUAL TABLE IF NOT EXISTS journal_fts USING fts5(
   decisions, questions, item_title, content=''
 );
@@ -75,4 +77,41 @@ CREATE TABLE IF NOT EXISTS gate_commands (
 CREATE TABLE IF NOT EXISTS prefs (
   key  TEXT PRIMARY KEY,
   body TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS missions (
+  id         INTEGER PRIMARY KEY,
+  task_id    INTEGER NOT NULL REFERENCES tasks(id),
+  slug       TEXT NOT NULL,
+  stage_plan TEXT NOT NULL,              -- JSON array of stage names
+  stage_cursor INTEGER NOT NULL DEFAULT 0,
+  dir        TEXT NOT NULL,              -- repo-relative .troopers/... path
+  status     TEXT NOT NULL DEFAULT 'running'
+             CHECK (status IN ('running','closed','stopped')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS handoffs (
+  id         INTEGER PRIMARY KEY,
+  mission_id INTEGER NOT NULL REFERENCES missions(id),
+  stage      TEXT NOT NULL,              -- brainstorm|plan|implement|gate|verify|audit
+  attempt    INTEGER NOT NULL DEFAULT 1, -- fix loops increment
+  verdict    TEXT,                       -- e.g. PASS|FAIL|BLOCK|OK|green|red, free text
+  content    TEXT NOT NULL,              -- the ≤30-line handoff, verbatim
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS artifacts (
+  id         INTEGER PRIMARY KEY,
+  mission_id INTEGER NOT NULL REFERENCES missions(id),
+  filename   TEXT NOT NULL,              -- 01-brainstorm.md, ...
+  body       TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- External content: rows can be deleted (a contentless table cannot), so
+-- re-ingests never leave stale rowids behind or merge bodies on rowid reuse.
+CREATE VIRTUAL TABLE IF NOT EXISTS artifacts_fts USING fts5(
+  filename, body, content='artifacts', content_rowid='id'
 );

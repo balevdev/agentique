@@ -32,12 +32,14 @@ paths_glob, verified_sha = current HEAD). Kinds:
   set them carefully).
 - `boundary` — dependency rules the code actually observes ("domain/ never
   imports infra/"). Only rules the code follows today or the human states;
-  note violations honestly. Boundaries are included in every tick's packet.
+  note violations honestly. Boundaries go into every mission's `00-intel.md`
+  and inline into implementer briefs.
 - `convention` — naming, error handling, test placement; the dominant pattern
   a new change is expected to follow.
 - `sensitive_zone` — paths where a defect is expensive: auth, money,
   migrations, public API contracts, data deletion. Specific paths, not vibes.
-  These trigger independent review on ticks and are in every packet.
+  Touching one makes the auditor stage mandatory in the stage plan, and they
+  are in every packet.
 - `gotcha` — real, non-obvious traps only.
 
 Keep bodies short — a map, not a wiki: point to files rather than restating
@@ -46,19 +48,20 @@ them. Aim for what v1 fit in ~150 lines total.
 ## 3. Mechanize what deserves it
 
 For each boundary that matters and is cheap to enforce, propose a hardening
-item (an eslint `no-restricted-imports` rule, a fallow boundary, a failing
-test) — it goes into the first task's items or a dedicated hardening task,
-approved like anything else. A boundary lives in a tool someone else
+task (an eslint `no-restricted-imports` rule, a fallow boundary, a failing
+test) — it goes through intake like anything else and is approved before any
+mission runs it. A boundary lives in a tool someone else
 maintains, or it lives in a knowledge section — never in a bespoke engine.
 
 ## Maintaining the map (every phase, forever)
 
-- The tick checks `knowledge stale --paths <item files>` before building;
-  stale sections get re-verified (repomap or a quick read) and re-stamped via
-  `knowledge set` with the new `verified_sha`.
-- When a tick teaches something a newcomer would need, add it — the smallest
-  edit that captures the fact.
-- When reality contradicts the map, the map is wrong: fix it in the same tick
-  and say so in the journal. A confident stale map is worse than no map.
+- Mission open checks `knowledge stale --paths <the task's paths>` once,
+  before writing `00-intel.md`; stale sections get re-verified (repomap or a
+  quick read) and re-stamped via `knowledge set` with the new `verified_sha`.
+- When a mission teaches something a newcomer would need, add it at close —
+  the smallest edit that captures the fact.
+- When reality contradicts the map, the map is wrong: fix it in the same
+  mission and say so in the journal. A confident stale map is worse than no
+  map.
 - Cross-project standing preferences of the human (dependency policy, style
   instincts) belong in `prefs set`, not per-project sections.
