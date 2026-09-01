@@ -187,6 +187,7 @@ function version(db: Database | null) {
 
 const INDEX_HTML = readFileSync(join(UI_DIR, "index.html"), "utf8");
 const CSS = readFileSync(join(UI_DIR, "style.css"), "utf8");
+const THEME_JS = readFileSync(join(UI_DIR, "theme.js"), "utf8");
 const build = await Bun.build({ entrypoints: [join(UI_DIR, "app.ts")], target: "browser" });
 if (!build.success) {
   console.error("app.ts failed to build:\n" + build.logs.join("\n"));
@@ -209,13 +210,15 @@ async function handle(req: Request): Promise<Response> {
   const p = url.pathname;
   if (!HOST_RE.test(req.headers.get("host") ?? "")) return json({ error: "bad host" }, 403);
   if (req.method !== "GET") return json({ error: "read-only" }, 405);
-  if (p === "/") return new Response(INDEX_HTML,
-    { headers: { "content-type": "text/html; charset=utf-8", "content-security-policy": CSP,
-                 "x-content-type-options": "nosniff" } });
-  if (p === "/style.css") return new Response(CSS,
-    { headers: { "content-type": "text/css; charset=utf-8", "x-content-type-options": "nosniff" } });
-  if (p === "/app.js") return new Response(APP_JS,
-    { headers: { "content-type": "text/javascript; charset=utf-8", "x-content-type-options": "nosniff" } });
+  // no-store: heuristic caching would otherwise mix an old app.js or
+  // style.css with a new server after an upgrade — the assets are tiny.
+  const asset = (body: string, type: string, extra: Record<string, string> = {}) =>
+    new Response(body, { headers: { "content-type": `${type}; charset=utf-8`,
+      "cache-control": "no-store", "x-content-type-options": "nosniff", ...extra } });
+  if (p === "/") return asset(INDEX_HTML, "text/html", { "content-security-policy": CSP });
+  if (p === "/style.css") return asset(CSS, "text/css");
+  if (p === "/app.js") return asset(APP_JS, "text/javascript");
+  if (p === "/theme.js") return asset(THEME_JS, "text/javascript");
   if (!p.startsWith("/api/")) return json({ error: "not found" }, 404);
   let db: Database | null = null;
   try {
@@ -281,6 +284,7 @@ if (argv.snapshot !== undefined) {
   const data = { overview: o, projects, journal, patches };
   // <-escape so DB content can never terminate the inline script tag.
   const html = INDEX_HTML
+    .replace('<script src="/theme.js"></script>', () => `<script>\n${THEME_JS}\n</script>`)
     .replace('<link rel="stylesheet" href="/style.css">', () => `<style>\n${CSS}\n</style>`)
     .replace('<script type="module" src="/app.js"></script>', () =>
       `<script>window.__SNAPSHOT__=${JSON.stringify(data).replace(/</g, "\\u003c")}</script>\n<script type="module">\n${APP_JS}\n</script>`);

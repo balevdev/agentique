@@ -74,12 +74,7 @@ function kindBadge(kind: string, verdict?: string | null): HTMLElement {
 }
 
 // ---------- theme ----------
-
-function initTheme() {
-  const saved = localStorage.getItem("anakin-theme");
-  document.documentElement.dataset.theme =
-    saved ?? (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
-}
+// Initial theme is set by /theme.js in <head>, before first paint.
 
 function themeToggle(): HTMLElement {
   const b = h("button", "theme-toggle", "◐");
@@ -87,7 +82,7 @@ function themeToggle(): HTMLElement {
   b.onclick = () => {
     const next = document.documentElement.dataset.theme === "light" ? "dark" : "light";
     document.documentElement.dataset.theme = next;
-    localStorage.setItem("anakin-theme", next);
+    try { localStorage.setItem("anakin-theme", next); } catch { /* storage may be blocked */ }
   };
   return b;
 }
@@ -96,18 +91,27 @@ function themeToggle(): HTMLElement {
 
 const root = document.getElementById("app")!;
 let seq = "";
+let renderToken = 0;
+let lastRoute = "";
+
+const VIEWS = new Set(["task", "missions", "journal", "knowledge", "gate"]);
 
 function route(): { view: string; pid: string | null } {
   const parts = location.hash.replace(/^#\/?/, "").split("/").filter(Boolean);
-  if (parts[0] === "p" && parts[1]) return { view: parts[2] ?? "task", pid: parts[1] };
+  if (parts[0] === "p" && parts[1])
+    return { view: VIEWS.has(parts[2] ?? "") ? parts[2] : "task", pid: parts[1] };
   return { view: "overview", pid: null };
 }
 
-async function render() {
+async function render(): Promise<boolean> {
+  // A slow render must never clobber a newer one (rapid navigation, or a
+  // poll refresh racing a hashchange): last call wins, stale calls bail.
+  const token = ++renderToken;
   const r = route();
-  const o = await api("/api/overview");
   const main = h("main", "main");
+  let o: Json = null;
   try {
+    o = await api("/api/overview");
     if (o.empty) main.append(emptyState());
     else if (!r.pid) main.append(renderOverview(o));
     else {
@@ -118,7 +122,27 @@ async function render() {
   } catch (e) {
     main.append(h("div", "banner", `something went wrong: ${e}`));
   }
-  root.replaceChildren(renderRail(o, r), main);
+  if (token !== renderToken) return false;
+  // A focused filter input survives the rebuild: its value comes back from the
+  // filter maps (saved per keystroke), and focus + caret are put back below.
+  const ae = document.activeElement;
+  const focusKey = ae instanceof HTMLInputElement ? ae.dataset.fkey : undefined;
+  const selA = focusKey ? (ae as HTMLInputElement).selectionStart : null;
+  const selB = focusKey ? (ae as HTMLInputElement).selectionEnd : null;
+  // A same-route refresh keeps the reading position; navigation starts at top.
+  const key = `${r.view}:${r.pid}`;
+  const y = key === lastRoute ? scrollY : 0;
+  lastRoute = key;
+  root.replaceChildren(renderRail(o ?? {}, r), main);
+  scrollTo(0, y);
+  if (focusKey) {
+    const inp = root.querySelector<HTMLInputElement>(`input[data-fkey="${focusKey}"]`);
+    if (inp) {
+      inp.focus();
+      inp.setSelectionRange(selA ?? inp.value.length, selB ?? inp.value.length);
+    }
+  }
+  return o !== null;
 }
 
 async function renderProjectView(r: { view: string; pid: string | null }, p: Json): Promise<HTMLElement> {
@@ -129,16 +153,21 @@ async function renderProjectView(r: { view: string; pid: string | null }, p: Jso
   return renderProject(p);
 }
 
+async function checkVersion() {
+  // Don't poll a hidden tab, and don't rebuild under an open kind dropdown —
+  // a focused filter input is fine, render() restores its focus and caret.
+  if (document.hidden) return;
+  if (document.activeElement instanceof HTMLSelectElement) return;
+  try {
+    const v = await api("/api/version");
+    // The seq is committed only after a successful render: a failed one must
+    // be retried on the next poll, not skipped until the next DB write.
+    if (v.seq !== seq && await render()) seq = v.seq;
+  } catch { /* server briefly away — keep polling */ }
+}
+
 async function poll() {
-  // Don't yank the DOM out from under someone typing in a filter or
-  // holding the kind dropdown open.
-  if (!(document.activeElement instanceof HTMLInputElement ||
-        document.activeElement instanceof HTMLSelectElement)) {
-    try {
-      const v = await api("/api/version");
-      if (v.seq !== seq) { seq = v.seq; await render(); }
-    } catch { /* server briefly away — keep polling */ }
-  }
+  await checkVersion();
   setTimeout(poll, 2000);
 }
 
@@ -146,7 +175,8 @@ async function poll() {
 
 function renderRail(o: Json, r: { view: string; pid: string | null }): HTMLElement {
   const rail = h("nav", "rail");
-  rail.append(link("#/", "brand", "anakin"));
+  rail.append(link("#/", "brand",
+    h("span", "brand-mark", h("i"), h("i"), h("i")), "anakin"));
   if (SNAP) rail.append(h("span", "snap-badge", "snapshot"));
   rail.append(link("#/", `rail-item${!r.pid ? " active" : ""}`, "Overview"));
   rail.append(h("div", "rail-head", "Projects"));
@@ -169,7 +199,7 @@ function emptyState(): HTMLElement {
 }
 
 function stat(label: string, value: string | number): HTMLElement {
-  return h("div", "stat card", h("div", "stat-value", String(value)), h("div", "stat-label", label));
+  return h("div", "stat card", h("div", "stat-label", label), h("div", "stat-value", String(value)));
 }
 
 function sparkline(days: { d: string; c: number }[]): SVGElement {
@@ -261,6 +291,9 @@ function renderProject(p: Json): HTMLElement {
     return v;
   }
   const t = p.task;
+  const f = filterBar(v, `${p.project.id}:task`, "search this task…",
+    ".item-row, .gate-row, .j-entry");
+  v.append(f.bar, f.none);
   // v2 tasks carry no items — progress falls back to the latest mission's stages.
   const mission = (p.missions ?? []).find((m: Json) => m.task_id === t.id) ?? null;
   const total = p.items.length || (mission ? mission.stage_plan.length : 0);
@@ -308,7 +341,61 @@ function renderProject(p: Json): HTMLElement {
   for (const e of p.journal.slice(0, 5)) jc.append(journalRow(e));
   if (!p.journal.length) jc.append(h("p", "quiet", "quiet so far"));
   v.append(jc);
+  f.run();
   return v;
+}
+
+// Live refreshes rebuild the whole DOM; this state survives them so a refresh
+// never visibly collapses what the reader opened or clears a typed filter.
+// One store serves every tab's filter, keyed `${pid}:${view}` (the journal's
+// entry carries its kind select too). Patches are immutable: fetched once.
+const expanded = new Set<string>();
+const patchCache = new Map<number, string>();
+const viewFilter = new Map<string, { q: string; kind?: string }>();
+
+// textContent would match collapsed entry bodies and button labels; only what
+// the reader can actually see should decide whether a row survives the filter.
+function visibleText(el: HTMLElement): string {
+  let out = "";
+  for (const node of el.childNodes) {
+    if (node.nodeType === Node.TEXT_NODE) out += node.textContent;
+    else if (node instanceof HTMLElement && !node.hidden && node.tagName !== "BUTTON")
+      out += " " + visibleText(node);
+  }
+  return out;
+}
+
+// The non-journal tabs search client-side: their data is already fully loaded,
+// so the box filters what's on screen with zero round-trips (the journal keeps
+// its server-side FTS over the full history). Rows that don't match hide; a
+// card whose every row hid hides with it; row-less cards (the hero) stay put.
+function filterBar(v: HTMLElement, key: string, placeholder: string, rowSel: string) {
+  const search = h("input", "search") as HTMLInputElement;
+  search.placeholder = placeholder;
+  search.dataset.fkey = key;
+  search.value = viewFilter.get(key)?.q ?? "";
+  const none = h("p", "quiet", "nothing matches");
+  const run = () => {
+    const q = search.value.trim().toLowerCase();
+    const rows = [...v.querySelectorAll<HTMLElement>(rowSel)];
+    const alive = new Map<HTMLElement, boolean>();
+    for (const row of rows) {
+      row.hidden = !!q && !visibleText(row).toLowerCase().includes(q);
+      const card = row.closest<HTMLElement>(".card");
+      if (card && card !== row) alive.set(card, (alive.get(card) ?? false) || !row.hidden);
+    }
+    for (const [card, ok] of alive) card.hidden = !ok;
+    none.hidden = !q || !rows.length || rows.some((r) => !r.hidden);
+  };
+  let deb: ReturnType<typeof setTimeout>;
+  search.oninput = () => {
+    // Saved per keystroke, not per run: a live rebuild mid-typing restores the
+    // input from this map and must not lose the not-yet-filtered tail.
+    viewFilter.set(key, { q: search.value });
+    clearTimeout(deb);
+    deb = setTimeout(run, 150);
+  };
+  return { bar: h("div", "toolbar", search), none, run };
 }
 
 function renderDiff(patch: string): HTMLElement {
@@ -334,13 +421,22 @@ function journalRow(e: Json): HTMLElement {
   if (e.tree_hash) body.append(h("div", "quiet mono", `tree ${short(e.tree_hash)} · head ${short(e.head_sha)}`));
   if (e.has_patch) {
     const btn = h("button", "btn", "view patch");
-    (btn as HTMLButtonElement).onclick = async () => {
-      btn.replaceWith(renderDiff(await apiText(`/api/patch/${e.id}`)));
+    const show = async () => {
+      const text = patchCache.get(e.id) ?? await apiText(`/api/patch/${e.id}`);
+      if (!text) return; // transient fetch failure — keep the button, a click retries
+      patchCache.set(e.id, text);
+      btn.replaceWith(renderDiff(text));
     };
+    (btn as HTMLButtonElement).onclick = show;
     body.append(btn);
+    if (patchCache.has(e.id)) show();
   }
-  body.hidden = true;
-  head.onclick = () => { body.hidden = !body.hidden; };
+  const key = `j:${e.id}`;
+  body.hidden = !expanded.has(key);
+  head.onclick = () => {
+    body.hidden = !body.hidden;
+    body.hidden ? expanded.delete(key) : expanded.add(key);
+  };
   row.append(head, body);
   return row;
 }
@@ -348,8 +444,10 @@ function journalRow(e: Json): HTMLElement {
 async function renderJournal(pid: string, p: Json): Promise<HTMLElement> {
   const v = h("div", "view");
   v.append(projectHeader(p, "journal"));
+  const fkey = `${pid}:journal`;
   const search = h("input", "search") as HTMLInputElement;
   search.placeholder = "search memory…";
+  search.dataset.fkey = fkey;
   const select = h("select", "kind-select") as HTMLSelectElement;
   for (const k of ["all", "tick", "approval", "stop", "note"]) {
     const opt = document.createElement("option");
@@ -357,6 +455,9 @@ async function renderJournal(pid: string, p: Json): Promise<HTMLElement> {
     opt.textContent = k;
     select.append(opt);
   }
+  const saved = viewFilter.get(fkey);
+  if (saved) { search.value = saved.q; select.value = saved.kind ?? ""; }
+  const save = () => viewFilter.set(fkey, { q: search.value, kind: select.value });
   v.append(h("div", "toolbar", search, select));
   const list = h("div", "j-list");
   const more = h("button", "btn more", "older entries");
@@ -365,6 +466,7 @@ async function renderJournal(pid: string, p: Json): Promise<HTMLElement> {
   let before: number | null = null;
   async function load(reset: boolean) {
     if (reset) { list.replaceChildren(); before = null; }
+    save();
     const qs = new URLSearchParams();
     if (search.value.trim()) qs.set("q", search.value.trim());
     if (select.value) qs.set("kind", select.value);
@@ -376,8 +478,8 @@ async function renderJournal(pid: string, p: Json): Promise<HTMLElement> {
     more.hidden = !before;
   }
   let deb: ReturnType<typeof setTimeout>;
-  search.oninput = () => { clearTimeout(deb); deb = setTimeout(() => load(true), 250); };
-  select.onchange = () => load(true);
+  search.oninput = () => { save(); clearTimeout(deb); deb = setTimeout(() => load(true), 250); };
+  select.onchange = () => { save(); load(true); };
   (more as HTMLButtonElement).onclick = () => load(false);
   await load(true);
   return v;
@@ -402,8 +504,12 @@ function handoffRow(hf: Json): HTMLElement {
       h("div", "", hf.verdict ?? hf.content.split("\n")[0]),
       h("div", "quiet", timeAgo(hf.created_at))));
   const body = h("div", "j-body", h("pre", "", hf.content));
-  body.hidden = true;
-  head.onclick = () => { body.hidden = !body.hidden; };
+  const key = `h:${hf.id}`;
+  body.hidden = !expanded.has(key);
+  head.onclick = () => {
+    body.hidden = !body.hidden;
+    body.hidden ? expanded.delete(key) : expanded.add(key);
+  };
   row.append(head, body);
   return row;
 }
@@ -411,8 +517,12 @@ function handoffRow(hf: Json): HTMLElement {
 function renderMissions(p: Json): HTMLElement {
   const v = h("div", "view");
   v.append(projectHeader(p, "missions"));
-  if (!(p.missions ?? []).length)
+  if (!(p.missions ?? []).length) {
     v.append(h("div", "card", h("p", "quiet", "no missions yet — an approved task starts one")));
+    return v;
+  }
+  const f = filterBar(v, `${p.project.id}:missions`, "search missions…", ".card");
+  v.append(f.bar, f.none);
   for (const m of p.missions ?? []) {
     const c = h("div", "card");
     c.append(h("div", "hero-top", statusPill(m.status),
@@ -430,6 +540,7 @@ function renderMissions(p: Json): HTMLElement {
     }
     v.append(c);
   }
+  f.run();
   return v;
 }
 
@@ -438,7 +549,12 @@ const KINDS = ["layout", "boundary", "convention", "sensitive_zone", "gotcha"];
 function renderKnowledge(p: Json): HTMLElement {
   const v = h("div", "view");
   v.append(projectHeader(p, "knowledge"));
-  if (!p.knowledge.length) v.append(h("div", "card", h("p", "quiet", "no knowledge recorded yet")));
+  if (!p.knowledge.length) {
+    v.append(h("div", "card", h("p", "quiet", "no knowledge recorded yet")));
+    return v;
+  }
+  const f = filterBar(v, `${p.project.id}:knowledge`, "search knowledge…", ".k-row");
+  v.append(f.bar, f.none);
   for (const kind of KINDS) {
     const secs = p.knowledge.filter((k: Json) => k.kind === kind);
     if (!secs.length) continue;
@@ -451,12 +567,17 @@ function renderKnowledge(p: Json): HTMLElement {
         h("pre", "k-body", s.body)));
     v.append(c);
   }
+  f.run();
   return v;
 }
 
 function renderGate(p: Json): HTMLElement {
   const v = h("div", "view");
   v.append(projectHeader(p, "gate"));
+  const f = p.gate.length || p.prefs.length
+    ? filterBar(v, `${p.project.id}:gate`, "search gate & prefs…", ".gate-row, .k-row")
+    : null;
+  if (f) v.append(f.bar, f.none);
   const gc = h("div", "card");
   gc.append(h("div", "card-title", "gate — runs in order, after implement, before verify"));
   p.gate.forEach((g: Json, i: number) =>
@@ -472,12 +593,24 @@ function renderGate(p: Json): HTMLElement {
     pc.append(h("div", "k-row", h("div", "k-head", h("strong", "", pref.key)), h("pre", "k-body", pref.body)));
   if (!p.prefs.length) pc.append(h("p", "quiet", "no prefs set"));
   v.append(pc);
+  f?.run();
   return v;
 }
 
 // ---------- boot ----------
 
-initTheme();
 addEventListener("hashchange", render);
-render();
-if (!SNAP) poll();
+if (SNAP) render();
+else {
+  (async () => {
+    // Baseline the seq before first paint, or the first poll would always see
+    // a mismatch and rebuild the page it just drew — but commit the baseline
+    // only if that first render succeeded, so a failed boot self-heals in 2s.
+    let v: Json = null;
+    try { v = await api("/api/version"); } catch { /* first poll retries */ }
+    if (await render() && v) seq = v.seq;
+    setTimeout(poll, 2000);
+  })();
+  // A backgrounded tab skips polling; catch up the moment it's visible again.
+  addEventListener("visibilitychange", () => { if (!document.hidden) checkVersion(); });
+}

@@ -223,6 +223,11 @@ describe("dashboard ui assets", () => {
       expect(css).toContain('[data-theme="light"]');
       const js = await (await fetch(`${d.base}/app.js`)).text();
       expect(js).toContain("renderOverview");
+      // theme.js must be a servable file (CSP forbids inline scripts) and
+      // must run before first paint, so index.html references it in <head>.
+      const theme = await fetch(`${d.base}/theme.js`);
+      expect(theme.headers.get("content-type")).toContain("text/javascript");
+      expect(await theme.text()).toContain("anakin-theme");
     } finally { d.stop(); }
   });
 });
@@ -259,6 +264,9 @@ describe("snapshot", () => {
     const html = readFileSync(out, "utf8");
     expect(html).toContain("window.__SNAPSHOT__");
     expect(html).toContain("oklch(");
+    // theme init must be inlined — a snapshot file has no server to fetch from
+    expect(html).toContain("anakin-theme");
+    expect(html).not.toContain('src="/theme.js"');
     // raw script tag from DB data must never appear unescaped
     expect(html).not.toContain("<script>alert(1)");
     expect(html).toContain("\\u003cscript>alert(1)");
